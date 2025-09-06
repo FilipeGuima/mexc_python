@@ -1,0 +1,6 @@
+curl -X POST http://localhost:80 -H "Content-Type: application/json" -d '{"command": "LONG"}'
+
+curl -X POST http://localhost:80 -H "Content-Type: application/json" -d '{"command": "SHORT"}'
+
+curl -X POST http://localhost:80 -H "Content-Type: application/json" -d '{"command": "CLOSE"}'
+
