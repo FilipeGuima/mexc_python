@@ -8,7 +8,10 @@ from mexcpy.mexcTypes import OrderSide, PositionType, PositionInfo
 
 # --- CONFIGURATION ---
 TELEGRAM_TOKEN = "8255841968:AAGpzntmicAST9IqfBTBxExnSkHH7WktJRw"
-MEXC_TOKEN = "WEB4fe4b377534c557ed822621b521dbcced6d03f469ae0610af920e5a726f77ec0"
+# MEXC_TOKEN = "WEB4fe4b377534c557ed822621b521dbcced6d03f469ae0610af920e5a726f77ec0"
+MEXC_API_KEY = "mx0vglbHa8gXEKQ4VH"
+MEXC_SECRET_KEY = "af55541eea2a49ed86a7bc8bb6ee89d0"
+
 
 DEFAULT_PAIR = "BTC_USDT"
 DEFAULT_MARGIN_PERC = 1.0
@@ -20,7 +23,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-API = MexcFuturesAPI(MEXC_TOKEN, testnet=True)
+API = MexcFuturesAPI(api_key=MEXC_API_KEY, secret_key=MEXC_SECRET_KEY, testnet=True)
 
 
 # --- TRADING LOGIC ---
