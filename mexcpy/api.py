@@ -217,7 +217,7 @@ class MexcFuturesAPI:
             "page_size": page_size,
         }
         return await self._make_request(
-            "GET", "/private/position/list/history_positions", params
+            "GET", "/private/position/list/history_positions", params, response_type=PositionInfo
         )
 
     async def get_open_positions(
@@ -252,7 +252,7 @@ class MexcFuturesAPI:
             "page_num": page_num,
             "page_size": page_size,
         }
-        return await self._make_request("GET", "/private/order/list/open_orders", params)
+        return await self._make_request("GET", "/private/order/list/open_orders", params, response_type=Order)
 
     async def get_historical_orders(
         self,
