@@ -225,23 +225,23 @@ def print_help():
     Commands are comma-separated. Default pair: {DEFAULT_PAIR}
 
     TRADING:
-    /long,<equity%>,<leverage>
-    /short,<equity%>,<leverage>
-    /longtp,<equity%>,<leverage>,<tp%>
-    /shorttp,<equity%>,<leverage>,<tp%>
-    /close,<percentage>
+    long,<equity%>,<leverage>
+    short,<equity%>,<leverage>
+    longtp,<equity%>,<leverage>,<tp%>
+    shorttp,<equity%>,<leverage>,<tp%>
+    close,<percentage>
 
     VIEWING:
-    /stats
-    /positions
-    /help
-    /exit
+    stats
+    positions
+    help
+    exit
 
     EXAMPLES:
-    /long,1,50         (Opens a long using 1% equity at 50x leverage)
-    /longtp,2.5,75,5   (Opens a long with 2.5% equity, 75x lev, 5% TP)
-    /close,50          (Closes 50% of the default pair's position)
-    /close,100         (Closes 100% of the default pair's position)
+    long,1,50         (Opens a long using 1% equity at 50x leverage)
+    longtp,2.5,75,5   (Opens a long with 2.5% equity, 75x lev, 5% TP)
+    close,50          (Closes 50% of the default pair's position)
+    close,100         (Closes 100% of the default pair's position)
     """
     print(help_text)
 
@@ -249,7 +249,7 @@ async def main():
     """Main function to run the terminal command handler."""
     print("MEXC Terminal Trader is running.")
     print(f"Default pair is set to {DEFAULT_PAIR}.")
-    print("Type '/help' for a list of commands or '/exit' to quit.")
+    print("Type 'help' for a list of commands or 'exit' to quit.")
 
     while True:
         try:
@@ -268,7 +268,7 @@ async def main():
                 break
             elif command == "help":
                 print_help()
-            elif command in ["/long", "/short"]:
+            elif command in ["long", "short"]:
                 equity_perc = float(args[0]) if len(args) > 0 else DEFAULT_EQUITY_PERC
                 leverage = int(args[1]) if len(args) > 1 else DEFAULT_LEVERAGE
                 side = OrderSide.OpenLong if command == "long" else OrderSide.OpenShort
@@ -299,7 +299,7 @@ async def main():
                 positions_msg = await get_position_stats()
                 print(positions_msg)
             else:
-                print(f"Unknown command: '{command}'. Type /help for options.")
+                print(f"Unknown command: '{command}'. Type p for options.")
 
         except (ValueError, IndexError) as e:
             print(f"Invalid arguments. Please check your command format. Error: {e}")
