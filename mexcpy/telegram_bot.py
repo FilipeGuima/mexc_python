@@ -12,7 +12,8 @@ from mexcpy.mexcTypes import OrderSide, PositionType, PositionInfo, CreateOrderR
 TELEGRAM_TOKEN = "REDACTED"
 MEXC_TOKEN = "REDACTED"
 
-DEFAULT_PAIR = "BTC_USDT"
+#BTC_USDT
+DEFAULT_PAIR = "SUI_USDT"
 DEFAULT_MARGIN_PERC = 1.0
 DEFAULT_LEVERAGE = 20
 DEFAULT_TP_PERC = 1
@@ -27,7 +28,7 @@ API = MexcFuturesAPI(token=MEXC_TOKEN, testnet=True)
 
 
 # --- TRADING LOGIC ---
-async def open_trade_position(pair: str, side: OrderSide, margin_perc: float, leverage: int):
+async def open_trade_position(pair: str, side: OrderSide, equity_perc: float, leverage: int):
     try:
         assets_response = await API.get_user_assets()
         if not assets_response.success or not assets_response.data:
@@ -37,30 +38,32 @@ async def open_trade_position(pair: str, side: OrderSide, margin_perc: float, le
         if not usdt_asset: return {"success": False, "error": "USDT asset not found."}
 
         equity = usdt_asset.equity
+
+        margin_in_usdt = equity * (equity_perc / 100.0)
+
         ticker_response = await API.get_ticker(pair)
         if not ticker_response.success or not ticker_response.data:
             return {"success": False, "error": f"Could not fetch ticker for {pair}."}
-
         current_price = ticker_response.data.get('lastPrice')
+
         contract_details_response = await API.get_contract_details(pair)
         if not contract_details_response.success or not contract_details_response.data:
             return {"success": False, "error": f"Could not fetch contract details for {pair}."}
-
         contract_size = contract_details_response.data.get('contractSize')
-        margin_in_usdt = equity * (margin_perc / 100.0)
+
         position_size_usdt = margin_in_usdt * leverage
         value_of_one_contract_usdt = contract_size * current_price
         vol = int(position_size_usdt / value_of_one_contract_usdt)
 
         if vol == 0:
-            return {"success": False, "error": "Calculated volume is zero. Increase margin or leverage."}
+            return {"success": False, "error": "Calculated volume is zero. Increase equity percentage or leverage."}
 
         order_response = await API.create_market_order(pair, side, vol, leverage)
 
         if order_response.success:
             return {
                 "success": True,
-                "message": f"Opened {side.name}: {vol} contracts of {pair}.",
+                "message": f"Opened {side.name}: {vol} contracts of {pair} using {margin_in_usdt:.2f} USDT as margin ({equity_perc}% equity @ {leverage}x leverage).",
                 "orderId": order_response.data.orderId,
                 "vol": vol
             }
@@ -71,8 +74,39 @@ async def open_trade_position(pair: str, side: OrderSide, margin_perc: float, le
         return {"success": False, "error": str(e)}
 
 
-async def open_trade_with_tp(pair: str, side: OrderSide, margin_perc: float, leverage: int, tp_perc: float):
-    open_result = await open_trade_position(pair, side, margin_perc, leverage)
+async def partially_close_trade(symbol: str, percentage: float):
+    try:
+        if not 0 < percentage <= 100:
+            return {"success": False, "error": "Percentage must be between 1 and 100."}
+
+        positions_response = await API.get_open_positions(symbol=symbol)
+        if not positions_response.success or not positions_response.data:
+            return {"success": False, "error": f"No open position found for {symbol}."}
+
+        position = positions_response.data[0]
+
+        vol_to_close = int(position.holdVol * (percentage / 100.0))
+
+        if vol_to_close == 0:
+            return {"success": False, "error": "Calculated volume to close is zero. Please increase the percentage."}
+
+        position_type_enum = PositionType(position.positionType)
+        close_side = OrderSide.CloseLong if position_type_enum == PositionType.Long else OrderSide.CloseShort
+
+        close_response = await API.create_market_order(
+            position.symbol, close_side, vol_to_close, position.leverage
+        )
+
+        if close_response.success:
+            return {"success": True, "message": f"Successfully placed order to close {percentage}% ({vol_to_close} contracts) of {symbol}."}
+        else:
+            return {"success": False, "error": f"Failed to close position: {close_response.message}"}
+
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+async def open_trade_with_tp(pair: str, side: OrderSide, equity_perc: float, leverage: int, tp_perc: float):
+    open_result = await open_trade_position(pair, side, equity_perc, leverage)
 
     if not open_result["success"]:
         return open_result
@@ -81,15 +115,11 @@ async def open_trade_with_tp(pair: str, side: OrderSide, margin_perc: float, lev
         order_id = open_result["orderId"]
         vol = open_result["vol"]
 
-        # await asyncio.sleep(1)
-
         order_details_response = await API.get_order_by_order_id(str(order_id))
-
         if not order_details_response.success:
             return {"success": False, "error": "Position opened, but failed to get order details for TP."}
 
         entry_price = order_details_response.data.dealAvgPrice
-
         if entry_price == 0:
             ticker = await API.get_ticker(pair)
             entry_price = ticker.data.get('lastPrice')
@@ -109,7 +139,6 @@ async def open_trade_with_tp(pair: str, side: OrderSide, margin_perc: float, lev
             symbol=pair, side=close_side, vol=vol, leverage=leverage,
             price=rounded_tp_price, openType=OpenType.Isolated, type=OrderType.PriceLimited,
         )
-
         tp_order_response = await API.create_order(tp_order_request)
 
         if tp_order_response.success:
@@ -119,6 +148,25 @@ async def open_trade_with_tp(pair: str, side: OrderSide, margin_perc: float, lev
 
     except Exception as e:
         return {"success": False, "error": f"Position opened, but an error occurred setting TP: {e}"}
+
+async def trade_with_tp_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    command = update.message.text.split()[0].upper()
+    side = OrderSide.OpenLong if command == "/LONGTP" else OrderSide.OpenShort
+    pair = DEFAULT_PAIR
+
+    args = context.args
+    equity_perc = float(args[0]) if len(args) > 0 else DEFAULT_MARGIN_PERC
+    leverage = int(args[1]) if len(args) > 1 else DEFAULT_LEVERAGE
+    tp_perc = float(args[2]) if len(args) > 2 else DEFAULT_TP_PERC
+
+    await update.message.reply_text(
+        f"Processing {command.replace('/', '')} for <code>{pair}</code> with {tp_perc}% TP...")
+    result = await open_trade_with_tp(pair, side, equity_perc, leverage, tp_perc)
+
+    if result["success"]:
+        await update.message.reply_text(result["message"])
+    else:
+        await update.message.reply_text(f"Error: <code>{result['error']}</code>")
 
 
 async def close_all_trades():
@@ -204,14 +252,12 @@ async def get_position_stats():
         for pos in positions_response.data:
             pos_type = "LONG" if pos.positionType == PositionType.Long else "SHORT"
 
-            # Find the take-profit order associated with this position
             tp_order = next((
                 order for order in pending_orders
                 if order.positionId == pos.positionId and order.orderType == OrderType.PriceLimited
             ), None)
             tp_price_str = f"<code>{tp_order.price}</code>" if tp_order else "N/A"
 
-            # Convert timestamp to readable date
             open_time = datetime.fromtimestamp(pos.createTime / 1000).strftime('%Y-%m-%d %H:%M:%S')
 
             stats_message += f"""
@@ -235,34 +281,43 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    help_text = """<b>Commands:</b>
-<code>/long [pair] [margin%] [leverage]</code>
-<code>/short [pair] [margin%] [leverage]</code>
-<code>/longtp [pair] [margin%] [leverage] [tp%]</code>
-<code>/shorttp [pair] [margin%] [leverage] [tp%]</code>
-<code>/close</code> - Closes all positions.
-<code>/stats [pair]</code> - Gets account or market stats.
+    help_text = f"""<b>Commands (for default pair: {DEFAULT_PAIR}):</b>
+<code>/long [equity%] [leverage]</code>
+<code>/short [equity%] [leverage]</code>
+<code>/longtp [equity%] [leverage] [tp%]</code>
+<code>/shorttp [equity%] [leverage] [tp%]</code>
+<code>/close [percentage]</code> - Closes a % of the position.
+<code>/stats</code> - Gets account and market stats.
 <code>/positions</code> - Shows details of all open positions.
 
 <b>Examples:</b>
-<code>/longtp ETH_USDT 2.5 50 5</code>
-<code>/stats BTC_USDT</code>
-<code>/positions</code>
+<code>/long 1 50</code> (Uses 1% of equity at 50x lev)
+<code>/longtp 2.5 75 5</code> (Uses 2.5% of equity, 75x lev, 5% TP)
+<code>/close 50</code> (Closes 50% of the position)
 """
     await update.message.reply_text(help_text)
 
 
 async def trade_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    command = update.message.text.split()[0].upper()
-    side = OrderSide.OpenLong if command == "/LONG" else OrderSide.OpenShort
+    parts = update.message.text.split(',')
+    command = parts[0].upper()
+    args = parts[1:]
 
-    args = context.args
-    pair = args[0] if len(args) > 0 else DEFAULT_PAIR
-    margin_perc = float(args[1]) if len(args) > 1 else DEFAULT_MARGIN_PERC
-    leverage = int(args[2]) if len(args) > 2 else DEFAULT_LEVERAGE
+    side = None
+    if command == "/LONG":
+        side = OrderSide.OpenLong
+    elif command == "/SHORT":
+        side = OrderSide.OpenShort
+    else:
+        await update.message.reply_text(f"Unknown command: `{parts[0]}`. Please use `/long` or `/short`.")
+        return
+
+    pair = DEFAULT_PAIR
+    equity_perc = float(args[0]) if len(args) > 0 else DEFAULT_MARGIN_PERC
+    leverage = int(args[1]) if len(args) > 1 else DEFAULT_LEVERAGE
 
     await update.message.reply_text(f"Processing {command.replace('/', '')} for <code>{pair}</code>...")
-    result = await open_trade_position(pair, side, margin_perc, leverage)
+    result = await open_trade_position(pair, side, equity_perc, leverage)
 
     if result["success"]:
         await update.message.reply_text(result["message"])
@@ -271,18 +326,27 @@ async def trade_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def trade_with_tp_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    command = update.message.text.split()[0].upper()
-    side = OrderSide.OpenLong if command == "/LONGTP" else OrderSide.OpenShort
+    parts = update.message.text.split(',')
+    command = parts[0].upper()
+    args = parts[1:]
 
-    args = context.args
-    pair = args[0] if len(args) > 0 else DEFAULT_PAIR
-    margin_perc = float(args[1]) if len(args) > 1 else DEFAULT_MARGIN_PERC
-    leverage = int(args[2]) if len(args) > 2 else DEFAULT_LEVERAGE
-    tp_perc = float(args[3]) if len(args) > 3 else DEFAULT_TP_PERC
+    side = None
+    if command == "/LONGTP":
+        side = OrderSide.OpenLong
+    elif command == "/SHORTTP":
+        side = OrderSide.OpenShort
+    else:
+        await update.message.reply_text(f"Unknown command: `{parts[0]}`. Please use `/longtp` or `/shorttp`.")
+        return
+
+    pair = DEFAULT_PAIR
+    equity_perc = float(args[0]) if len(args) > 0 else DEFAULT_MARGIN_PERC
+    leverage = int(args[1]) if len(args) > 1 else DEFAULT_LEVERAGE
+    tp_perc = float(args[2]) if len(args) > 2 else DEFAULT_TP_PERC
 
     await update.message.reply_text(
         f"Processing {command.replace('/', '')} for <code>{pair}</code> with {tp_perc}% TP...")
-    result = await open_trade_with_tp(pair, side, margin_perc, leverage, tp_perc)
+    result = await open_trade_with_tp(pair, side, equity_perc, leverage, tp_perc)
 
     if result["success"]:
         await update.message.reply_text(result["message"])
@@ -291,23 +355,35 @@ async def trade_with_tp_command(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 async def close_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text("Closing all positions...")
-    result = await close_all_trades()
-    await update.message.reply_text(result["message"])
+    args = context.args
+    symbol = DEFAULT_PAIR
+    percentage = 100.0
+
+    if args:
+        try:
+            percentage = float(args[0])
+        except ValueError:
+            await update.message.reply_text("Error: Invalid percentage. Please provide a number.")
+            return
+
+    await update.message.reply_text(f"Processing request to close {percentage}% of {symbol}...")
+    result = await partially_close_trade(symbol, percentage)
+
+    if result["success"]:
+        await update.message.reply_text(result["message"])
+    else:
+        await update.message.reply_text(f"Error: <code>{result['error']}</code>")
 
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if context.args:
-        pair = context.args[0].upper()
-        await update.message.reply_text(f"Fetching market stats for <code>{pair}</code>...")
-        message = await get_market_stats(pair)
-    else:
-        await update.message.reply_text("Fetching account stats...")
-        message = await get_account_stats()
-    await update.message.reply_text(message)
+    await update.message.reply_text(f"Fetching stats for account and <code>{DEFAULT_PAIR}</code>...")
+    account_message = await get_account_stats()
+    market_message = await get_market_stats(DEFAULT_PAIR)
 
+    combined_message = f"{account_message}\n{market_message}"
 
-# --- NEW COMMAND HANDLER FOR /positions ---
+    await update.message.reply_text(combined_message)
+
 async def positions_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("Fetching open positions...")
     message = await get_position_stats()
@@ -335,9 +411,7 @@ def main() -> None:
     application.add_handler(CommandHandler("stats", stats_command))
     application.add_handler(CommandHandler("longtp", trade_with_tp_command))
     application.add_handler(CommandHandler("shorttp", trade_with_tp_command))
-    # Add the new handler
     application.add_handler(CommandHandler("positions", positions_command))
-    # Keep this last
     application.add_handler(MessageHandler(filters.COMMAND, unknown_command))
 
     print("MEXC Futures API Initialized.")
