@@ -11,50 +11,63 @@ from mexcpy.mexcTypes import OrderSide, PositionType, CreateOrderRequest, OpenTy
 MEXC_TOKEN = "REDACTED"
 DEFAULT_PAIR = "SUI_USDT"
 
-# --- NEW: DEFAULT PARAMETERS CONFIGURATION ---
-# These values are used when a webhook is received WITHOUT parameters.
-DEFAULT_EQUITY_PERC = 0.5  # 0.5% of total equity
-DEFAULT_LEVERAGE = 10  # 10x leverage
-DEFAULT_CLOSE_PERC = 100.0  # 100% of the position
+# --- DEFAULT PARAMETERS CONFIGURATION ---
+DEFAULT_EQUITY_PERC = 0.5
+DEFAULT_LEVERAGE = 10
+DEFAULT_CLOSE_PERC = 100.0
 
 # --- SETUP ---
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-API = MexcFuturesAPI(token=MEXC_TOKEN, testnet=True)
+API = MexcFuturesAPI(token=MEXC_TOKEN, testnet=False)
 app = FastAPI(title="Dynamic MEXC Trading Webhook")
 
 
-# --- TRADING LOGIC (Unchanged) ---
-# All your powerful, async trading functions are the same as before.
+# --- TRADING LOGIC (Hardcoded for Cross Margin) ---
 async def open_trade_position(pair: str, side: OrderSide, equity_perc: float, leverage: int):
-    # ... (This function is exactly the same)
+    """Opens a trade using Cross Margin."""
     try:
         assets_response = await API.get_user_assets()
         if not assets_response.success or not assets_response.data:
             return {"success": False, "error": "Could not fetch user assets."}
         usdt_asset = next((asset for asset in assets_response.data if asset.currency == "USDT"), None)
         if not usdt_asset: return {"success": False, "error": "USDT asset not found."}
+
         equity = usdt_asset.equity
         margin_in_usdt = equity * (equity_perc / 100.0)
+
         ticker_response = await API.get_ticker(pair)
         if not ticker_response.success or not ticker_response.data:
             return {"success": False, "error": f"Could not fetch ticker for {pair}."}
         current_price = ticker_response.data.get('lastPrice')
+
         contract_details_response = await API.get_contract_details(pair)
         if not contract_details_response.success or not contract_details_response.data:
             return {"success": False, "error": f"Could not fetch contract details for {pair}."}
         contract_size = contract_details_response.data.get('contractSize')
+
         position_size_usdt = margin_in_usdt * leverage
         value_of_one_contract_usdt = contract_size * current_price
         vol = int(position_size_usdt / value_of_one_contract_usdt)
+
         if vol == 0:
             return {"success": False, "error": "Calculated volume is zero. Increase equity percentage or leverage."}
-        order_response = await API.create_market_order(pair, side, vol, leverage)
+
+        order_request = CreateOrderRequest(
+            symbol=pair,
+            side=side,
+            vol=vol,
+            leverage=leverage,
+            openType=OpenType.Cross,
+            type=OrderType.MarketOrder
+        )
+        order_response = await API.create_order(order_request)
+
         if order_response.success:
             return {
                 "success": True,
-                "message": f"Opened {side.name}: {vol} contracts of {pair} using {margin_in_usdt:.2f} USDT as margin ({equity_perc}% equity @ {leverage}x leverage).",
+                "message": f"Opened {side.name}: {vol} contracts of {pair} using {margin_in_usdt:.2f} USDT as margin ({equity_perc}% equity @ {leverage}x leverage) [Cross Margin].",
             }
         else:
             return {"success": False, "error": order_response.message}
@@ -64,26 +77,41 @@ async def open_trade_position(pair: str, side: OrderSide, equity_perc: float, le
 
 
 async def partially_close_trade(symbol: str, percentage: float):
-    # ... (This function is exactly the same)
+    """Closes a position using Cross Margin."""
     try:
         if not 0 < percentage <= 100:
             return {"success": False, "error": "Percentage must be between 1 and 100."}
+
         positions_response = await API.get_open_positions(symbol=symbol)
         if not positions_response.success or not positions_response.data:
             return {"success": True, "message": f"No open positions to close for {symbol}."}
+
         closed_messages, error_messages = [], []
+
         for position in positions_response.data:
             vol_to_close = int(position.holdVol * (percentage / 100.0))
             if vol_to_close == 0: continue
+
             position_type_enum = PositionType(position.positionType)
             close_side = OrderSide.CloseLong if position_type_enum == PositionType.Long else OrderSide.CloseShort
-            close_response = await API.create_market_order(position.symbol, close_side, vol_to_close, position.leverage)
+
+            order_request = CreateOrderRequest(
+                symbol=position.symbol,
+                side=close_side,
+                vol=vol_to_close,
+                leverage=position.leverage,
+                openType=OpenType.Cross,
+                type=OrderType.MarketOrder
+            )
+            close_response = await API.create_order(order_request)
+
             if close_response.success:
                 pos_type_str = "LONG" if position_type_enum == PositionType.Long else "SHORT"
                 closed_messages.append(
-                    f"Successfully placed order to close {percentage}% of {pos_type_str} ({vol_to_close} contracts).")
+                    f"Successfully placed order to close {percentage}% of {pos_type_str} ({vol_to_close} contracts) [Cross Margin].")
             else:
                 error_messages.append(f"Failed to close {pos_type_str} position: {close_response.message}")
+
         final_message = "\n".join(closed_messages) + "\n" + "\n".join(error_messages)
         return {"success": True, "message": final_message.strip()}
     except Exception as e:
@@ -91,8 +119,7 @@ async def partially_close_trade(symbol: str, percentage: float):
         return {"success": False, "error": str(e)}
 
 
-# --- NEW: DYNAMIC WEBHOOK LISTENER ---
-
+# --- DYNAMIC WEBHOOK LISTENER ---
 @app.post("/")
 async def webhook(request: Request):
     """Receives a webhook and processes it like a terminal command."""
@@ -143,9 +170,3 @@ if __name__ == "__main__":
     print("Starting Dynamic MEXC Trading Webhook server...")
     print("To run, use the command: uvicorn trading_webhook:app --host 0.0.0.0 --port 80")
     uvicorn.run(app, host="0.0.0.0", port=80)
-
-# On Mac/Linux
-#curl -X POST -d "LONG" http://127.0.0.1:80
-
-# On Windows PowerShell
-#curl http://127.0.0.1:80 -Method POST -Body "LONG"
