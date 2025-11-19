@@ -9,7 +9,7 @@ from mexcpy.mexcTypes import OrderSide, PositionType, CreateOrderRequest, OpenTy
 
 # --- CONFIGURATION ---
 MEXC_TOKEN = "REDACTED"
-DEFAULT_PAIR = "SUI_USDT"
+DEFAULT_PAIR = "BTC_USDC"
 
 # --- DEFAULT PARAMETERS CONFIGURATION ---
 DEFAULT_EQUITY_PERC = 0.5
@@ -20,7 +20,7 @@ DEFAULT_CLOSE_PERC = 100.0
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-API = MexcFuturesAPI(token=MEXC_TOKEN, testnet=False)
+API = MexcFuturesAPI(token=MEXC_TOKEN, testnet=True)
 app = FastAPI(title="Dynamic MEXC Trading Webhook")
 
 
@@ -28,14 +28,20 @@ app = FastAPI(title="Dynamic MEXC Trading Webhook")
 async def open_trade_position(pair: str, side: OrderSide, equity_perc: float, leverage: int):
     """Opens a trade using Cross Margin."""
     try:
+        margin_currency = pair.split('_')[1]
+
         assets_response = await API.get_user_assets()
         if not assets_response.success or not assets_response.data:
             return {"success": False, "error": "Could not fetch user assets."}
-        usdt_asset = next((asset for asset in assets_response.data if asset.currency == "USDT"), None)
-        if not usdt_asset: return {"success": False, "error": "USDT asset not found."}
 
-        equity = usdt_asset.equity
-        margin_in_usdt = equity * (equity_perc / 100.0)
+        target_asset = next((asset for asset in assets_response.data if asset.currency == margin_currency), None)
+
+        if not target_asset:
+            return {"success": False, "error": f"{margin_currency} asset not found in wallet."}
+
+        equity = target_asset.equity
+
+        margin_amount = equity * (equity_perc / 100.0)
 
         ticker_response = await API.get_ticker(pair)
         if not ticker_response.success or not ticker_response.data:
@@ -47,12 +53,14 @@ async def open_trade_position(pair: str, side: OrderSide, equity_perc: float, le
             return {"success": False, "error": f"Could not fetch contract details for {pair}."}
         contract_size = contract_details_response.data.get('contractSize')
 
-        position_size_usdt = margin_in_usdt * leverage
-        value_of_one_contract_usdt = contract_size * current_price
-        vol = int(position_size_usdt / value_of_one_contract_usdt)
+        position_size_value = margin_amount * leverage
+        value_of_one_contract = contract_size * current_price
+
+        vol = int(position_size_value / value_of_one_contract)
 
         if vol == 0:
-            return {"success": False, "error": "Calculated volume is zero. Increase equity percentage or leverage."}
+            return {"success": False,
+                    "error": f"Calculated volume is zero. Equity: {equity} {margin_currency}. Value required for 1 contract: {value_of_one_contract:.2f}"}
 
         order_request = CreateOrderRequest(
             symbol=pair,
@@ -67,7 +75,7 @@ async def open_trade_position(pair: str, side: OrderSide, equity_perc: float, le
         if order_response.success:
             return {
                 "success": True,
-                "message": f"Opened {side.name}: {vol} contracts of {pair} using {margin_in_usdt:.2f} USDT as margin ({equity_perc}% equity @ {leverage}x leverage) [Cross Margin].",
+                "message": f"Opened {side.name}: {vol} contracts of {pair} using {margin_amount:.2f} {margin_currency} as margin ({equity_perc}% equity @ {leverage}x leverage) [Cross Margin].",
             }
         else:
             return {"success": False, "error": order_response.message}
