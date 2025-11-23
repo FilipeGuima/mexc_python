@@ -1,0 +1,297 @@
+import asyncio
+import logging
+import re
+from telethon import TelegramClient, events
+
+# --- IMPORTS ---
+from mexcpy.api import MexcFuturesAPI
+from mexcpy.mexcTypes import (
+    OrderSide, CreateOrderRequest, OpenType, OrderType,
+    TriggerOrderRequest, TriggerType, TriggerPriceType, ExecuteCycle
+)
+
+# --- CONFIGURATION ---
+API_ID =
+API_HASH = ""
+TARGET_CHATS = [-]
+
+MEXC_TOKEN = "REDACTED"
+
+# --- SETUP ---
+logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+MexcAPI = MexcFuturesAPI(token=MEXC_TOKEN, testnet=True)
+client = TelegramClient('anon_session', API_ID, API_HASH)
+
+
+# ---  MONITORING ---
+async def monitor_trade(symbol: str, start_vol: int, targets: list):
+
+    print(f" Auto-monitoring started for {symbol}...")
+    last_vol = start_vol
+    first_run = True
+
+    def identify_tp(fill_price):
+        if not targets: return "Manual"
+
+        best_i = -1
+        min_diff = float('inf')
+
+        for i, target in enumerate(targets):
+            diff = abs(fill_price - target)
+            if diff < min_diff:
+                min_diff = diff
+                best_i = i
+
+        if best_i != -1 and (min_diff / targets[best_i] < 0.005):
+            return f"TP{best_i + 1}"
+        return None
+
+    while True:
+        await asyncio.sleep(5)
+
+        try:
+            pos_res = await MexcAPI.get_open_positions(symbol)
+
+            if not pos_res.success or not pos_res.data:
+
+                await MexcAPI.cancel_all_trigger_orders(symbol=symbol)
+                await MexcAPI.cancel_all_orders(symbol=symbol)
+
+                hist_res = await MexcAPI.get_historical_orders(symbol=symbol, states='3', page_size=5)
+
+                hit_labels = set()
+                is_sl = False
+
+                if hist_res.success and hist_res.data:
+                    for order in hist_res.data:
+                        if isinstance(order, dict):
+                            price = float(order.get('dealAvgPrice', 0))
+                            o_type = int(order.get('orderType', 0))
+                        else:
+                            price = float(order.dealAvgPrice)
+                            o_type = int(order.orderType)
+
+                        if o_type == 1:
+                            label = identify_tp(price)
+                            if label: hit_labels.add(label)
+                        elif o_type == 5:
+                            is_sl = True
+
+                reason = "Unknown"
+                if is_sl:
+                    reason = " **Stop Loss Hit**"
+                elif hit_labels:
+                    sorted_labels = sorted(list(hit_labels))
+                    labels_str = ", ".join(sorted_labels)
+                    reason = f" **{labels_str} Hit** (All Closed)"
+                else:
+                    reason = " Manual/Unknown Close"
+
+                msg = f" **{symbol} Closed!**\nReason: {reason}\n Cleanup done."
+                print(f"\n{msg}\n---------------------------------------")
+                await client.send_message('me', msg)
+                break
+
+            position = pos_res.data[0]
+            current_vol = position.holdVol
+
+            if first_run:
+                last_vol = current_vol
+                first_run = False
+                continue
+
+            if current_vol < last_vol:
+                diff = last_vol - current_vol
+
+                hist_res = await MexcAPI.get_historical_orders(symbol=symbol, states='3', page_size=1)
+                tp_label = "Partial"
+
+                if hist_res.success and hist_res.data:
+                    last_order = hist_res.data[0]
+                    if isinstance(last_order, dict):
+                        price = float(last_order.get('dealAvgPrice', 0))
+                    else:
+                        price = float(last_order.dealAvgPrice)
+
+                    found_label = identify_tp(price)
+                    if found_label: tp_label = found_label
+
+                msg = f" **{symbol} {tp_label} Hit!**\n   Reduced by {diff} contracts.\n   Remaining: {current_vol}"
+                print(f"\n{msg}\n---------------------------------------")
+                await client.send_message('me', msg)
+                last_vol = current_vol
+
+            if current_vol > last_vol:
+                last_vol = current_vol
+
+        except Exception as e:
+            print(f" Monitor Error: {e}")
+            await asyncio.sleep(5)
+
+
+# --- PARSER ---
+def parse_signal(text: str):
+    try:
+        text = text.replace('*', '').replace(',', '').replace('\xa0', ' ')
+        print(f" DEBUG RAW: {text}")
+
+        data = {}
+        pair_match = re.search(r"PAIR:\s*([A-Z0-9]+)[/_]([A-Z0-9]+)", text, re.IGNORECASE)
+        if not pair_match: return None
+        data['symbol'] = f"{pair_match.group(1)}_{pair_match.group(2)}".upper()
+
+        size_match = re.search(r"POSITION SIZE:\s*(\d+)\s*-\s*(\d+)%", text, re.IGNORECASE)
+        if size_match:
+            data['equity_perc'] = (float(size_match.group(1)) + float(size_match.group(2))) / 2
+        else:
+            data['equity_perc'] = 1.0
+
+        type_match = re.search(r"TYPE:\s*(LONG|SHORT)", text, re.IGNORECASE)
+        if not type_match: return None
+        data['side'] = OrderSide.OpenLong if type_match.group(1).upper() == "LONG" else OrderSide.OpenShort
+
+        entry_match = re.search(r"ENTRY[^0-9]*([\d.]+)", text, re.IGNORECASE)
+        data['entry'] = float(entry_match.group(1)) if entry_match else "Market"
+
+        sl_match = re.search(r"SL[^0-9]*([\d.]+)", text, re.IGNORECASE)
+        data['sl'] = float(sl_match.group(1)) if sl_match else None
+
+        lev_match = re.search(r"LEVERAGE[^0-9]*(\d+)", text, re.IGNORECASE)
+        data['leverage'] = int(lev_match.group(1)) if lev_match else 20
+
+        tps = re.findall(r"TP\d[^0-9]*([\d.]+)", text, re.IGNORECASE)
+        data['tps'] = [float(tp) for tp in tps]
+
+        return data
+    except Exception as e:
+        logger.error(f"Parse Error: {e}")
+        return None
+
+
+# --- TRADER ---
+async def execute_signal_trade(data):
+    symbol = data['symbol']
+    leverage = data['leverage']
+    side = data['side']
+    equity_perc = data['equity_perc']
+    entry_label = data['entry']
+
+    assets_response = await MexcAPI.get_user_assets()
+    if not assets_response.success: return f" API Error: {assets_response.message}"
+
+    usdt_asset = next((a for a in assets_response.data if a.currency == "USDT"), None)
+    if not usdt_asset: return " Error: USDT not found."
+
+    balance = usdt_asset.availableBalance
+
+    ticker_res = await MexcAPI.get_ticker(symbol)
+    if not ticker_res.success: return f" Ticker Error: {ticker_res.message}"
+    current_price = ticker_res.data.get('lastPrice')
+
+    contract_res = await MexcAPI.get_contract_details(symbol)
+    if not contract_res.success: return f" Contract Error: {contract_res.message}"
+    contract_size = contract_res.data.get('contractSize')
+
+    margin_amount = balance * (equity_perc / 100.0)
+    position_value = margin_amount * leverage
+    vol = int(position_value / (contract_size * current_price))
+
+    if vol == 0: return f"Vol is 0. (Bal: {balance:.2f}, Lev: {leverage})"
+
+    logger.info(f" Executing {side.name} {symbol} x{leverage} | Vol: {vol}")
+
+    open_req = CreateOrderRequest(
+        symbol=symbol,
+        side=side,
+        vol=vol,
+        leverage=leverage,
+        openType=OpenType.Cross,
+        type=OrderType.MarketOrder
+    )
+    order_res = await MexcAPI.create_order(open_req)
+    if not order_res.success: return f" Open Failed: {order_res.message}"
+
+    if data['sl']:
+        sl_trigger = TriggerType.LessThanOrEqual if side == OrderSide.OpenLong else TriggerType.GreaterThanOrEqual
+        sl_side = OrderSide.CloseLong if side == OrderSide.OpenLong else OrderSide.CloseShort
+
+        sl_req = TriggerOrderRequest(
+            symbol=symbol,
+            side=sl_side,
+            vol=vol,
+            openType=OpenType.Cross,
+            triggerType=sl_trigger,
+            triggerPrice=data['sl'],
+            leverage=leverage,
+            orderType=OrderType.MarketOrder,
+            executeCycle=ExecuteCycle.UntilCanceled,
+            trend=TriggerPriceType.LatestPrice
+        )
+        await MexcAPI.create_trigger_order(sl_req)
+
+    tp_formatted_msg = ""
+    if data['tps']:
+        tp_side = OrderSide.CloseLong if side == OrderSide.OpenLong else OrderSide.CloseShort
+
+        tp1_vol = int(vol * 0.50)
+        tp2_vol = int((vol - tp1_vol) * 0.50)
+        tp3_vol = vol - tp1_vol - tp2_vol
+
+        tps_vols = [tp1_vol, tp2_vol, tp3_vol]
+        tps_labels = ["50%", "50% (of rem)", "100% (of rem)"]
+
+        for i, tp_price in enumerate(data['tps']):
+            if i >= 3: break
+            target_vol = tps_vols[i]
+            if target_vol <= 0: continue
+
+            tp_req = CreateOrderRequest(
+                symbol=symbol,
+                side=tp_side,
+                vol=target_vol,
+                leverage=leverage,
+                price=tp_price,
+                openType=OpenType.Cross,
+                type=OrderType.PriceLimited,
+                reduceOnly=True
+            )
+            await MexcAPI.create_order(tp_req)
+            tp_formatted_msg += f"\n   • TP{i + 1}: {tp_price} ({tps_labels[i]})"
+
+    asyncio.create_task(monitor_trade(symbol, vol, data['tps']))
+
+    return (
+        f" SUCCESS: {symbol} {side.name} x{leverage}\n"
+        f"---------------------------------------\n"
+        f" Pos Size: {equity_perc}% (Midpoint) | Vol: {vol}\n"
+        f" Entry: {entry_label}\n"
+        f" SL: {data['sl']}\n"
+        f" TPs: {tp_formatted_msg if tp_formatted_msg else 'None'}\n"
+        f" Auto-monitoring started..."
+    )
+
+
+@client.on(events.NewMessage(chats=TARGET_CHATS, incoming=True))
+async def handler(event):
+    text = event.text
+    if "PAIR:" in text and "TYPE:" in text:
+        print("\n Signal Detected! Parsing...")
+        signal_data = parse_signal(text)
+
+        if signal_data:
+            result = await execute_signal_trade(signal_data)
+            print(result)
+            await client.send_message('me', result)
+        else:
+            print("⚠ Failed to parse signal data.")
+
+
+if __name__ == "__main__":
+    print("---------------------------------------")
+    print(" USER LISTENER STARTED")
+    print(f" Watching Chats: {TARGET_CHATS}")
+    print("---------------------------------------")
+    client.start()
+    client.run_until_disconnected()
