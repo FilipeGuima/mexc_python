@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import re
+from datetime import datetime, timezone
 from telethon import TelegramClient, events
 
 # --- IMPORTS ---
@@ -17,6 +18,8 @@ TARGET_CHATS = [-]
 
 MEXC_TOKEN = "REDACTED"
 
+START_TIME = datetime.now(timezone.utc)
+
 # --- SETUP ---
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -25,28 +28,17 @@ MexcAPI = MexcFuturesAPI(token=MEXC_TOKEN, testnet=True)
 client = TelegramClient('anon_session', API_ID, API_HASH)
 
 
-# ---  MONITORING ---
+# --- SMART MONITORING ---
 async def monitor_trade(symbol: str, start_vol: int, targets: list):
-
     print(f" Auto-monitoring started for {symbol}...")
     last_vol = start_vol
     first_run = True
 
     def identify_tp(fill_price):
-        if not targets: return "Manual"
-
-        best_i = -1
-        min_diff = float('inf')
-
         for i, target in enumerate(targets):
-            diff = abs(fill_price - target)
-            if diff < min_diff:
-                min_diff = diff
-                best_i = i
-
-        if best_i != -1 and (min_diff / targets[best_i] < 0.005):
-            return f"TP{best_i + 1}"
-        return None
+            if abs(fill_price - target) / target < 0.005:
+                return f"TP{i + 1}"
+        return "Manual/Partial"
 
     while True:
         await asyncio.sleep(5)
@@ -75,7 +67,7 @@ async def monitor_trade(symbol: str, start_vol: int, targets: list):
 
                         if o_type == 1:
                             label = identify_tp(price)
-                            if label: hit_labels.add(label)
+                            hit_labels.add(label)
                         elif o_type == 5:
                             is_sl = True
 
@@ -83,13 +75,9 @@ async def monitor_trade(symbol: str, start_vol: int, targets: list):
                 if is_sl:
                     reason = " **Stop Loss Hit**"
                 elif hit_labels:
-                    sorted_labels = sorted(list(hit_labels))
-                    labels_str = ", ".join(sorted_labels)
-                    reason = f" **{labels_str} Hit** (All Closed)"
-                else:
-                    reason = " Manual/Unknown Close"
+                    reason = f" **{', '.join(sorted(hit_labels))} Hit** (All Closed)"
 
-                msg = f" **{symbol} Closed!**\nReason: {reason}\n Cleanup done."
+                msg = f" **{symbol} Closed!**\nReason: {reason}\n🧹 Cleanup done."
                 print(f"\n{msg}\n---------------------------------------")
                 await client.send_message('me', msg)
                 break
@@ -104,21 +92,7 @@ async def monitor_trade(symbol: str, start_vol: int, targets: list):
 
             if current_vol < last_vol:
                 diff = last_vol - current_vol
-
-                hist_res = await MexcAPI.get_historical_orders(symbol=symbol, states='3', page_size=1)
-                tp_label = "Partial"
-
-                if hist_res.success and hist_res.data:
-                    last_order = hist_res.data[0]
-                    if isinstance(last_order, dict):
-                        price = float(last_order.get('dealAvgPrice', 0))
-                    else:
-                        price = float(last_order.dealAvgPrice)
-
-                    found_label = identify_tp(price)
-                    if found_label: tp_label = found_label
-
-                msg = f" **{symbol} {tp_label} Hit!**\n   Reduced by {diff} contracts.\n   Remaining: {current_vol}"
+                msg = f" **{symbol} Partial TP Hit!**\n   Reduced by {diff} contracts.\n   Remaining: {current_vol}"
                 print(f"\n{msg}\n---------------------------------------")
                 await client.send_message('me', msg)
                 last_vol = current_vol
@@ -169,8 +143,6 @@ def parse_signal(text: str):
         logger.error(f"Parse Error: {e}")
         return None
 
-
-# --- TRADER ---
 async def execute_signal_trade(data):
     symbol = data['symbol']
     leverage = data['leverage']
@@ -178,13 +150,15 @@ async def execute_signal_trade(data):
     equity_perc = data['equity_perc']
     entry_label = data['entry']
 
+    quote_currency = symbol.split('_')[1]
+
     assets_response = await MexcAPI.get_user_assets()
     if not assets_response.success: return f" API Error: {assets_response.message}"
 
-    usdt_asset = next((a for a in assets_response.data if a.currency == "USDT"), None)
-    if not usdt_asset: return " Error: USDT not found."
+    target_asset = next((a for a in assets_response.data if a.currency == quote_currency), None)
+    if not target_asset: return f" Error: {quote_currency} not found in wallet."
 
-    balance = usdt_asset.availableBalance
+    balance = target_asset.availableBalance
 
     ticker_res = await MexcAPI.get_ticker(symbol)
     if not ticker_res.success: return f" Ticker Error: {ticker_res.message}"
@@ -198,7 +172,7 @@ async def execute_signal_trade(data):
     position_value = margin_amount * leverage
     vol = int(position_value / (contract_size * current_price))
 
-    if vol == 0: return f"Vol is 0. (Bal: {balance:.2f}, Lev: {leverage})"
+    if vol == 0: return f"⚠ Vol is 0. (Bal: {balance:.2f} {quote_currency}, Lev: {leverage})"
 
     logger.info(f" Executing {side.name} {symbol} x{leverage} | Vol: {vol}")
 
@@ -234,11 +208,9 @@ async def execute_signal_trade(data):
     tp_formatted_msg = ""
     if data['tps']:
         tp_side = OrderSide.CloseLong if side == OrderSide.OpenLong else OrderSide.CloseShort
-
         tp1_vol = int(vol * 0.50)
         tp2_vol = int((vol - tp1_vol) * 0.50)
         tp3_vol = vol - tp1_vol - tp2_vol
-
         tps_vols = [tp1_vol, tp2_vol, tp3_vol]
         tps_labels = ["50%", "50% (of rem)", "100% (of rem)"]
 
@@ -275,6 +247,9 @@ async def execute_signal_trade(data):
 
 @client.on(events.NewMessage(chats=TARGET_CHATS, incoming=True))
 async def handler(event):
+    if event.date < START_TIME:
+        return
+
     text = event.text
     if "PAIR:" in text and "TYPE:" in text:
         print("\n Signal Detected! Parsing...")
@@ -285,12 +260,13 @@ async def handler(event):
             print(result)
             await client.send_message('me', result)
         else:
-            print("⚠ Failed to parse signal data.")
+            print(" Failed to parse signal data.")
 
 
 if __name__ == "__main__":
-    print("---------------------------------------")
+    print("--------------------------------------")
     print(" USER LISTENER STARTED")
+    print(f" Start Time (UTC): {START_TIME}")
     print(f" Watching Chats: {TARGET_CHATS}")
     print("---------------------------------------")
     client.start()

@@ -3,7 +3,7 @@ from telethon import TelegramClient
 API_ID =
 API_HASH = ""
 
-client = TelegramClient('session', API_ID, API_HASH)
+client = TelegramClient('anon_session', API_ID, API_HASH)
 
 async def main():
     print("Fetching your chats...")
