@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 MexcAPI = MexcFuturesAPI(token=MEXC_TOKEN, testnet=True)
 client = TelegramClient('anon_session', API_ID, API_HASH)
 
+
 # --- HELPER FUNCTIONS ---
 def adjust_price_to_step(price, step_size):
     if not price:
@@ -51,6 +52,7 @@ async def monitor_trade(symbol: str, start_vol: int, targets: list):
 
     def identify_tp(fill_price):
         for i, target in enumerate(targets):
+            # 0.5% buffer for price matching
             if abs(fill_price - target) / target < 0.005:
                 return f"TP{i + 1}"
         return "Manual/Partial"
@@ -63,8 +65,8 @@ async def monitor_trade(symbol: str, start_vol: int, targets: list):
 
             if not pos_res.success or not pos_res.data:
 
-                await MexcAPI.cancel_all_trigger_orders(symbol=symbol)
                 await MexcAPI.cancel_all_orders(symbol=symbol)
+                await MexcAPI.cancel_all_trigger_orders(symbol=symbol)
 
                 hist_res = await MexcAPI.get_historical_orders(symbol=symbol, states='3', page_size=5)
 
@@ -88,7 +90,7 @@ async def monitor_trade(symbol: str, start_vol: int, targets: list):
 
                 reason = "Unknown"
                 if is_sl:
-                    reason = " **Stop Loss Hit**"
+                    reason = " **Stop Loss Hit (or Market Close)**"
                 elif hit_labels:
                     reason = f" **{', '.join(sorted(hit_labels))} Hit** (All Closed)"
 
@@ -165,6 +167,7 @@ async def execute_signal_trade(data):
     side = data['side']
     equity_perc = data['equity_perc']
     entry_label = data['entry']
+    sl_price_raw = data.get('sl')
 
     quote_currency = symbol.split('_')[1]
 
@@ -186,9 +189,7 @@ async def execute_signal_trade(data):
 
     contract_size = contract_res.data.get('contractSize')
     real_tick_size = contract_res.data.get('priceUnit')
-
     price_step = real_tick_size
-        # if real_tick_size else 0.0001
 
     print(f" DEBUG: {symbol} Tick Size: {price_step} | Current Price: {current_price}")
 
@@ -200,38 +201,25 @@ async def execute_signal_trade(data):
 
     logger.info(f" Executing {side.name} {symbol} x{leverage} | Vol: {vol}")
 
+    final_sl_price = adjust_price_to_step(sl_price_raw, price_step)
+
     open_req = CreateOrderRequest(
         symbol=symbol,
         side=side,
         vol=vol,
         leverage=leverage,
         openType=OpenType.Cross,
-        type=OrderType.MarketOrder
+        type=OrderType.MarketOrder,
+        stopLossPrice=final_sl_price
     )
+
     order_res = await MexcAPI.create_order(open_req)
     if not order_res.success: return f" Open Failed: {order_res.message}"
-
-    if data['sl']:
-        sl_trigger = TriggerType.LessThanOrEqual if side == OrderSide.OpenLong else TriggerType.GreaterThanOrEqual
-        sl_side = OrderSide.CloseLong if side == OrderSide.OpenLong else OrderSide.CloseShort
-
-        sl_req = TriggerOrderRequest(
-            symbol=symbol,
-            side=sl_side,
-            vol=vol,
-            openType=OpenType.Cross,
-            triggerType=sl_trigger,
-            triggerPrice=data['sl'],
-            leverage=leverage,
-            orderType=OrderType.MarketOrder,
-            executeCycle=ExecuteCycle.UntilCanceled,
-            trend=TriggerPriceType.LatestPrice
-        )
-        await MexcAPI.create_trigger_order(sl_req)
 
     tp_formatted_msg = ""
     if data['tps']:
         tp_side = OrderSide.CloseLong if side == OrderSide.OpenLong else OrderSide.CloseShort
+
         tp1_vol = int(vol * 0.50)
         tp2_vol = int((vol - tp1_vol) * 0.50)
         tp3_vol = vol - tp1_vol - tp2_vol
@@ -271,7 +259,7 @@ async def execute_signal_trade(data):
         f"---------------------------------------\n"
         f" Pos Size: {equity_perc}% (Midpoint) | Vol: {vol}\n"
         f" Entry: {entry_label}\n"
-        f" SL: {data.get('sl')} -> {adjust_price_to_step(data.get('sl'), price_step)}\n"
+        f" SL: {final_sl_price} (Set on Position )\n"
         f" TPs: {tp_formatted_msg if tp_formatted_msg else 'None'}\n"
         f" Auto-monitoring started..."
     )
