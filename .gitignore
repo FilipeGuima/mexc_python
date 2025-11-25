@@ -1,5 +1,6 @@
 *.session
 *.session-journal
+*.anon_session.session
 
 .venv/
 __pycache__/

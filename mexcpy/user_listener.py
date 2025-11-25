@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import re
+import math
 from datetime import datetime, timezone
 from telethon import TelegramClient, events
 
@@ -16,7 +17,7 @@ API_ID =
 API_HASH = ""
 TARGET_CHATS = [-]
 
-MEXC_TOKEN = "REDACTED"
+MEXC_TOKEN = ""
 
 START_TIME = datetime.now(timezone.utc)
 
@@ -27,8 +28,22 @@ logger = logging.getLogger(__name__)
 MexcAPI = MexcFuturesAPI(token=MEXC_TOKEN, testnet=True)
 client = TelegramClient('anon_session', API_ID, API_HASH)
 
+# --- HELPER FUNCTIONS ---
+def adjust_price_to_step(price, step_size):
+    if not price:
+        return None
+    if not step_size or step_size == 0:
+        return price
 
-# --- SMART MONITORING ---
+    step_str = f"{float(step_size):.16f}".rstrip('0')
+
+    precision = 0
+    if '.' in step_str:
+        precision = len(step_str.split('.')[1])
+
+    return round(price, precision)
+
+
 async def monitor_trade(symbol: str, start_vol: int, targets: list):
     print(f" Auto-monitoring started for {symbol}...")
     last_vol = start_vol
@@ -143,6 +158,7 @@ def parse_signal(text: str):
         logger.error(f"Parse Error: {e}")
         return None
 
+
 async def execute_signal_trade(data):
     symbol = data['symbol']
     leverage = data['leverage']
@@ -161,18 +177,26 @@ async def execute_signal_trade(data):
     balance = target_asset.availableBalance
 
     ticker_res = await MexcAPI.get_ticker(symbol)
-    if not ticker_res.success: return f" Ticker Error: {ticker_res.message}"
+    if not ticker_res.success or not ticker_res.data:
+        return f" Ticker Error: {ticker_res.message or 'No data returned'}"
     current_price = ticker_res.data.get('lastPrice')
 
     contract_res = await MexcAPI.get_contract_details(symbol)
     if not contract_res.success: return f" Contract Error: {contract_res.message}"
+
     contract_size = contract_res.data.get('contractSize')
+    real_tick_size = contract_res.data.get('priceUnit')
+
+    price_step = real_tick_size
+        # if real_tick_size else 0.0001
+
+    print(f" DEBUG: {symbol} Tick Size: {price_step} | Current Price: {current_price}")
 
     margin_amount = balance * (equity_perc / 100.0)
     position_value = margin_amount * leverage
     vol = int(position_value / (contract_size * current_price))
 
-    if vol == 0: return f"⚠ Vol is 0. (Bal: {balance:.2f} {quote_currency}, Lev: {leverage})"
+    if vol == 0: return f" Vol is 0. (Bal: {balance:.2f} {quote_currency}, Lev: {leverage})"
 
     logger.info(f" Executing {side.name} {symbol} x{leverage} | Vol: {vol}")
 
@@ -219,18 +243,26 @@ async def execute_signal_trade(data):
             target_vol = tps_vols[i]
             if target_vol <= 0: continue
 
+            final_tp_price = adjust_price_to_step(tp_price, price_step)
+
             tp_req = CreateOrderRequest(
                 symbol=symbol,
                 side=tp_side,
                 vol=target_vol,
                 leverage=leverage,
-                price=tp_price,
+                price=final_tp_price,
                 openType=OpenType.Cross,
                 type=OrderType.PriceLimited,
                 reduceOnly=True
             )
-            await MexcAPI.create_order(tp_req)
-            tp_formatted_msg += f"\n   • TP{i + 1}: {tp_price} ({tps_labels[i]})"
+
+            tp_res = await MexcAPI.create_order(tp_req)
+
+            if tp_res.success:
+                tp_formatted_msg += f"\n   • TP{i + 1}: {final_tp_price} ({tps_labels[i]})"
+            else:
+                print(f"  TP{i + 1} FAILED: {tp_res.message}")
+                tp_formatted_msg += f"\n   •  TP{i + 1} Failed ({tp_res.message})"
 
     asyncio.create_task(monitor_trade(symbol, vol, data['tps']))
 
@@ -239,7 +271,7 @@ async def execute_signal_trade(data):
         f"---------------------------------------\n"
         f" Pos Size: {equity_perc}% (Midpoint) | Vol: {vol}\n"
         f" Entry: {entry_label}\n"
-        f" SL: {data['sl']}\n"
+        f" SL: {data.get('sl')} -> {adjust_price_to_step(data.get('sl'), price_step)}\n"
         f" TPs: {tp_formatted_msg if tp_formatted_msg else 'None'}\n"
         f" Auto-monitoring started..."
     )
