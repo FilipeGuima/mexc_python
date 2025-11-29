@@ -10,12 +10,12 @@ from mexcpy.mexcTypes import OrderSide, PositionType, CreateOrderRequest, OpenTy
 
 ACCOUNTS = {
     "BOT1": {
-        "token": "REDACTED",
+        "token": "",
         "pair": "BTC_USDT"
     },
     "BOT2": {
-        "token": "REDACTED",
-        "pair": "SOL_USDT"
+        "token": "",
+        "pair": "BTC_USDT"
     },
     "BOT3": {
         "token": "REDACTED",
