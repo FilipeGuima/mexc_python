@@ -19,7 +19,7 @@ ACCOUNTS = {
     },
     "BOT3": {
         "token": "REDACTED",
-        "pair": "DOGE_USDC"
+        "pair": "DOGE_USDT"
     }
 }
 
@@ -58,9 +58,24 @@ async def open_trade_position(api: MexcFuturesAPI, pair: str, side: OrderSide, e
 
         contract_size = contract_details_response.data.get('contractSize')
 
-        if equity_perc < 0: equity_perc = 0
+        raw_fee_rate = contract_details_response.data.get('takerFeeRate', 0.0002)
 
-        margin_amount = balance * (equity_perc / 100.0)
+        if margin_currency == "USDT":
+            fee_reserve_perc = 0.0
+        else:
+            slippage_buffer = 0.0004
+            total_safety_rate = raw_fee_rate + slippage_buffer
+            fee_reserve_perc = total_safety_rate * leverage * 100
+
+        max_usable_perc = 100.0 - fee_reserve_perc
+
+        effective_perc = equity_perc
+        if effective_perc > max_usable_perc:
+            effective_perc = max_usable_perc
+
+        if effective_perc < 0: effective_perc = 0
+
+        margin_amount = balance * (effective_perc / 100.0)
 
         ticker_response = await api.get_ticker(pair)
         if not ticker_response.success or not ticker_response.data:
