@@ -15,30 +15,34 @@ from mexcpy.mexcTypes import (
     TriggerOrderRequest, TriggerType, TriggerPriceType, ExecuteCycle
 )
 
-load_dotenv()
+import asyncio
+import logging
+import re
+import math
+from datetime import datetime, timezone
+from telethon import TelegramClient, events
+
+# --- IMPORTS ---
+from mexcpy.api import MexcFuturesAPI
+from mexcpy.mexcTypes import (
+    OrderSide, CreateOrderRequest, OpenType, OrderType,
+    TriggerOrderRequest, TriggerType, TriggerPriceType, ExecuteCycle
+)
+from mexcpy.config import API_ID, API_HASH, TARGET_CHATS, MEXC_TOKEN, SESSION_FILE
 
 # --- CONFIGURATION ---
-API_ID = int(os.getenv("API_ID", "0"))
-API_HASH = os.getenv("API_HASH", "")
-
-chats_str = os.getenv("TARGET_CHATS", "")
-TARGET_CHATS = [int(x.strip()) for x in chats_str.split(',') if x.strip()]
-
-MEXC_TOKEN = os.getenv("MEXC_TOKEN", "")
-
 if not MEXC_TOKEN or not API_ID:
     print(" ERROR: Credentials missing. Please check your .env file.")
     exit(1)
 
 START_TIME = datetime.now(timezone.utc)
 
-# --- SETUP ---
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 MexcAPI = MexcFuturesAPI(token=MEXC_TOKEN, testnet=True)
-client = TelegramClient('anon_session', API_ID, API_HASH)
 
+client = TelegramClient(str(SESSION_FILE), API_ID, API_HASH)
 
 # --- HELPER FUNCTIONS ---
 def adjust_price_to_step(price, step_size):

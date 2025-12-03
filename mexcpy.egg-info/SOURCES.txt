@@ -1,6 +1,0 @@
-setup.py
-mexcpy.egg-info/PKG-INFO
-mexcpy.egg-info/SOURCES.txt
-mexcpy.egg-info/dependency_links.txt
-mexcpy.egg-info/requires.txt
-mexcpy.egg-info/top_level.txt

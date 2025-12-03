@@ -7,10 +7,12 @@ from typing import Dict, Any
 from fastapi import FastAPI, Request, HTTPException
 from dotenv import load_dotenv
 
+# --- IMPORTS ---
 from mexcpy.api import MexcFuturesAPI
 from mexcpy.mexcTypes import OrderSide, PositionType, CreateOrderRequest, OpenType, OrderType
+from mexcpy.config import BASE_DIR
 
-load_dotenv()
+load_dotenv(BASE_DIR / ".env")
 
 ACCOUNTS = {}
 bot_index = 1
@@ -27,7 +29,7 @@ while True:
 
     ACCOUNTS[f"BOT{bot_index}"] = {
         "token": token,
-        "pair": pair
+        "pair": pair if pair else "BTC_USDT"
     }
     bot_index += 1
 
