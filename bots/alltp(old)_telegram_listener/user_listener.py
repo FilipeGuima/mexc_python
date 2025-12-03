@@ -28,10 +28,10 @@ from mexcpy.mexcTypes import (
     OrderSide, CreateOrderRequest, OpenType, OrderType,
     TriggerOrderRequest, TriggerType, TriggerPriceType, ExecuteCycle
 )
-from mexcpy.config import API_ID, API_HASH, TARGET_CHATS, MEXC_TOKEN, SESSION_FILE
+from mexcpy.config import API_ID, API_HASH, TARGET_CHATS, USER_LISTENER_TOKEN, SESSION_USER
 
 # --- CONFIGURATION ---
-if not MEXC_TOKEN or not API_ID:
+if not USER_LISTENER_TOKEN or not API_ID:
     print(" ERROR: Credentials missing. Please check your .env file.")
     exit(1)
 
@@ -40,9 +40,8 @@ START_TIME = datetime.now(timezone.utc)
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-MexcAPI = MexcFuturesAPI(token=MEXC_TOKEN, testnet=True)
-
-client = TelegramClient(str(SESSION_FILE), API_ID, API_HASH)
+MexcAPI = MexcFuturesAPI(token=USER_LISTENER_TOKEN, testnet=True)
+client = TelegramClient(str(SESSION_USER), API_ID, API_HASH)
 
 # --- HELPER FUNCTIONS ---
 def adjust_price_to_step(price, step_size):

@@ -3,11 +3,8 @@ import logging
 import re
 import math
 import time
-import os
 from datetime import datetime, timezone
 from telethon import TelegramClient, events
-from dotenv import load_dotenv # Import dotenv
-
 
 # --- IMPORTS ---
 from mexcpy.api import MexcFuturesAPI
