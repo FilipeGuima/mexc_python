@@ -9,7 +9,6 @@ from datetime import datetime, timedelta
 from mexcpy.api import MexcFuturesAPI
 from mexcpy.mexcTypes import OrderSide, PositionType, PositionInfo, CreateOrderRequest, OpenType, OrderType
 
-# Import credentials directly from your central config
 from mexcpy.config import TELEGRAM_BOT_TOKEN, MEXC_TOKEN
 
 # --- CONFIGURATION CHECKS ---

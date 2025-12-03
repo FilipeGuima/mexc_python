@@ -11,15 +11,24 @@ load_dotenv(env_path)
 API_ID = int(os.getenv("API_ID", "0"))
 API_HASH = os.getenv("API_HASH", "")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+
 MEXC_TOKEN = os.getenv("MEXC_TOKEN")
+
+TP1_TOKEN = os.getenv("TP1_MEXC_TOKEN", MEXC_TOKEN)
+BREAKEVEN_TOKEN = os.getenv("BREAKEVEN_MEXC_TOKEN", MEXC_TOKEN)
+USER_LISTENER_TOKEN = os.getenv("USER_LISTENER_MEXC_TOKEN", MEXC_TOKEN)
 
 chats_str = os.getenv("TARGET_CHATS", "")
 TARGET_CHATS = [int(x.strip()) for x in chats_str.split(',') if x.strip()]
 
 SESSION_DIR = BASE_DIR / "sessions"
-SESSION_FILE = SESSION_DIR / "anon_session"
-
 SESSION_DIR.mkdir(parents=True, exist_ok=True)
+
+SESSION_TP1 = SESSION_DIR / "tp1_session"
+SESSION_BREAKEVEN = SESSION_DIR / "breakeven_session"
+SESSION_USER = SESSION_DIR / "user_listener_session"
+
+SESSION_MAIN = SESSION_DIR / "anon_session"
 
 if not API_ID or not API_HASH:
     print(f" WARNING: API_ID/HASH missing in {env_path}")

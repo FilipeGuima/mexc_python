@@ -1,0 +1,1 @@
+run pip install -e . in root ( /mexc_python )
