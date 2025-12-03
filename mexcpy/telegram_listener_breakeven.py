@@ -10,7 +10,8 @@ from telethon import TelegramClient, events
 from mexcpy.api import MexcFuturesAPI
 from mexcpy.mexcTypes import (
     OrderSide, CreateOrderRequest, OpenType, OrderType,
-    TriggerOrderRequest, TriggerType, TriggerPriceType, ExecuteCycle
+    TriggerOrderRequest, TriggerType, TriggerPriceType, ExecuteCycle,
+    PositionType
 )
 
 # --- CONFIGURATION ---
@@ -45,12 +46,121 @@ def adjust_price_to_step(price, step_size):
     return round(price, precision)
 
 
+# --- TRADE LOGIC ---
+
+async def move_sl_to_entry(symbol: str):
+    logger.info(f"Processing 'Move SL to Entry' for {symbol}...")
+
+    pos_res = await MexcAPI.get_open_positions(symbol)
+    if not pos_res.success or not pos_res.data:
+        return f"  Cannot Move SL: No open position found for {symbol}"
+
+    position = pos_res.data[0]
+    entry_price = float(position.openAvgPrice)
+    vol = position.holdVol
+    leverage = position.leverage
+    pos_type = position.positionType  # 1=Long, 2=Short
+
+    contract_res = await MexcAPI.get_contract_details(symbol)
+    price_step = contract_res.data.get('priceUnit') if contract_res.success else 0.01
+    final_sl_price = adjust_price_to_step(entry_price, price_step)
+
+    existing_sl_order_id = None
+    existing_tp_price = None
+
+    print(f"    Scanning for SL on {symbol} (Entry: {entry_price})...")
+
+    for attempt in range(3):
+        stops_res = await MexcAPI.get_stop_limit_orders(symbol=symbol, is_finished=0)
+
+        if stops_res.success and stops_res.data:
+            for order in stops_res.data:
+                is_dict = isinstance(order, dict)
+                o_id = order.get('id') if is_dict else order.id
+
+                t_price = (
+                              order.get('triggerPrice') if is_dict else getattr(order, 'triggerPrice', None)
+                          ) or (
+                              order.get('stopLossPrice') if is_dict else getattr(order, 'stopLossPrice', None)
+                          ) or (
+                              order.get('price') if is_dict else getattr(order, 'price', None)
+                          )
+
+                tp_val = order.get('takeProfitPrice') if is_dict else getattr(order, 'takeProfitPrice', None)
+
+                if t_price is None: continue
+                t_price = float(t_price)
+
+                is_sl = False
+                if pos_type == 1:
+                    if t_price < entry_price:
+                        is_sl = True
+                elif pos_type == 2:
+                    if t_price > entry_price:
+                        is_sl = True
+
+                if is_sl:
+                    existing_sl_order_id = o_id
+                    existing_tp_price = tp_val
+                    break
+
+        if existing_sl_order_id:
+            break
+        await asyncio.sleep(1.5)
+
+    if existing_sl_order_id:
+        print(f"   Identified SL (ID: {existing_sl_order_id}). Editing...")
+
+        res = await MexcAPI.update_stop_limit_trigger_plan_price(
+            stop_plan_order_id=existing_sl_order_id,
+            stop_loss_price=final_sl_price,
+            take_profit_price=existing_tp_price
+        )
+
+        if res.success:
+            tp_msg = f" (TP kept at {existing_tp_price})" if existing_tp_price else " (No TP found)"
+            return f"  **SL Updated to Entry!**\n   Symbol: {symbol}\n   New SL: {final_sl_price}\n  {tp_msg}"
+
+        print(f"    Edit Failed ({res.message}). executing CANCEL & REPLACE strategy...")
+        await MexcAPI.cancel_stop_limit_order(stop_plan_order_id=existing_sl_order_id)
+
+    else:
+        print("    No existing SL identified. Creating NEW SL...")
+
+    if pos_type == 1:  # Long
+        sl_side = OrderSide.CloseLong
+        trigger_type = TriggerType.LessThanOrEqual
+    else:
+        sl_side = OrderSide.CloseShort
+        trigger_type = TriggerType.GreaterThanOrEqual
+
+    sl_req = TriggerOrderRequest(
+        symbol=symbol,
+        side=sl_side,
+        vol=vol,
+        openType=OpenType.Cross,
+        triggerType=trigger_type,
+        triggerPrice=final_sl_price,
+        leverage=leverage,
+        orderType=OrderType.MarketOrder,
+        executeCycle=ExecuteCycle.UntilCanceled,
+        trend=TriggerPriceType.LatestPrice
+    )
+    res = await MexcAPI.create_trigger_order(sl_req)
+
+    if res.success:
+        return f"  **SL Created at Entry!** (New Order)\n   Symbol: {symbol}\n   New SL: {final_sl_price}"
+    else:
+        return f"  **Failed to Create SL**\n   Error: {res.message}"
+
+
 async def monitor_trade(symbol: str, start_vol: int, targets: list):
-    print(f" Auto-monitoring started for {symbol}... \n---------------------------------------")
+    import time
+    print(f" Auto-monitoring started for {symbol}...")
 
     last_vol = start_vol
     first_run = True
-    error_count = 0
+    tp1_target = targets[0] if targets else None
 
     while True:
         await asyncio.sleep(5)
@@ -59,21 +169,13 @@ async def monitor_trade(symbol: str, start_vol: int, targets: list):
             pos_res = await MexcAPI.get_open_positions(symbol)
 
             if not pos_res.success:
-                error_count += 1
                 await asyncio.sleep(5)
                 continue
-
-            error_count = 0
 
             if not pos_res.data:
                 await asyncio.sleep(2)
 
-                stop_res = await MexcAPI.get_stop_limit_orders(
-                    symbol=symbol,
-                    is_finished=1,
-                    page_size=5
-                )
-
+                stop_res = await MexcAPI.get_stop_limit_orders(symbol=symbol, is_finished=1, page_size=5)
                 reason = "Manual Close / Unknown"
 
                 if stop_res.success and stop_res.data:
@@ -84,29 +186,27 @@ async def monitor_trade(symbol: str, start_vol: int, targets: list):
 
                     if sorted_stops:
                         last_stop = sorted_stops[0]
-
                         if isinstance(last_stop, dict):
                             up_time = last_stop.get('updateTime', 0)
-                            state = last_stop.get('state')
-                            trig_side = last_stop.get('triggerSide')
-                            state_val = state if isinstance(state, int) else state.value
-                            side_val = trig_side if isinstance(trig_side, int) else trig_side.value
+                            state_val = last_stop.get('state')
+                            trig_price = float(last_stop.get('triggerPrice', 0))
                         else:
                             up_time = last_stop.updateTime
                             state_val = last_stop.state.value
-                            side_val = last_stop.triggerSide.value
+                            trig_price = float(last_stop.triggerPrice)
 
                         time_diff = (time.time() * 1000) - up_time
 
                         if state_val == 3 and time_diff < 120000:
-                            if side_val == 2:
-                                reason = "**TAKE PROFIT HIT**"
-                            elif side_val == 1:
-                                reason = " **STOP LOSS HIT**"
+                            if tp1_target and abs(trig_price - tp1_target) / tp1_target < 0.005:
+                                reason = f" **TAKE PROFIT HIT** (Target: {tp1_target})"
+                            else:
+                                reason = f" **STOP LOSS HIT** (Trigger: {trig_price})"
 
-                msg = f" **{symbol} Closed!**\nReason: {reason}\n"
+                msg = f" **{symbol} Closed!**\nReason: {reason}\n Cleanup done."
                 print(f"\n{msg}\n---------------------------------------")
                 await client.send_message('me', msg)
+                await MexcAPI.cancel_all_orders(symbol=symbol)
                 break
 
             position = pos_res.data[0]
@@ -121,12 +221,11 @@ async def monitor_trade(symbol: str, start_vol: int, targets: list):
                 last_vol = current_vol
 
         except Exception as e:
-            import traceback
             print(f" Monitor Exception for {symbol}: {e}")
-            traceback.print_exc()
             await asyncio.sleep(5)
 
 
+# --- PARSER ---
 def parse_signal(text: str):
     try:
         print(f" DEBUG RAW: {text}")
@@ -137,23 +236,25 @@ def parse_signal(text: str):
         data = {}
 
         pair_match = re.search(r"PAIR:\s*([A-Z0-9]+)[/_]([A-Z0-9]+)", text_clean, re.IGNORECASE)
-        if not pair_match:
-            print(" Parsing failed: No PAIR found.")
-            return None
+        if not pair_match: return None
         data['symbol'] = f"{pair_match.group(1)}_{pair_match.group(2)}".upper()
 
-        size_match = re.search(r"SIZE:\s*(\d+)(?:-\s*(\d+))?%", text_clean, re.IGNORECASE)
+        if "MOVE SL TO ENTRY" in text_clean.upper():
+            data['type'] = 'BREAKEVEN'
+            return data
 
+        data['type'] = 'TRADE'
+
+        size_match = re.search(r"SIZE:\s*(\d+)(?:-\s*(\d+))?%", text_clean, re.IGNORECASE)
         if size_match:
             val1 = float(size_match.group(1))
             val2 = float(size_match.group(2)) if size_match.group(2) else val1
             data['equity_perc'] = (val1 + val2) / 2
+        else:
+            data['equity_perc'] = 1.0
 
         side_match = re.search(r"SIDE:\s*(LONG|SHORT)", text_clean, re.IGNORECASE)
-        if not side_match:
-            print(" Parsing failed: No SIDE (LONG/SHORT) found.")
-            return None
-
+        if not side_match: return None
         direction = side_match.group(1).upper()
         data['side'] = OrderSide.OpenLong if direction == "LONG" else OrderSide.OpenShort
 
@@ -166,21 +267,16 @@ def parse_signal(text: str):
         lev_match = re.search(r"LEVERAGE:\s*(\d+)", text_clean, re.IGNORECASE)
         data['leverage'] = int(lev_match.group(1)) if lev_match else 20
 
-
         all_tps = re.findall(r"TP\d:\s*([\d.]+)", text_clean, re.IGNORECASE)
-
         real_tps = []
         if all_tps:
-            limit = 3 if len(all_tps) >= 6 else len(all_tps)
+            limit = 3 if len(all_tps) >= 3 else len(all_tps)
             real_tps = [float(tp) for tp in all_tps[:limit]]
-
         data['tps'] = real_tps
 
         return data
     except Exception as e:
         logger.error(f"Parse Error: {e}")
-        import traceback
-        traceback.print_exc()
         return None
 
 
@@ -213,10 +309,7 @@ async def execute_signal_trade(data):
     if not contract_res.success: return f" Contract Error: {contract_res.message}"
 
     contract_size = contract_res.data.get('contractSize')
-    real_tick_size = contract_res.data.get('priceUnit')
-    price_step = real_tick_size
-
-    print(f" DEBUG: {symbol} Tick Size: {price_step} | Current Price: {current_price}")
+    price_step = contract_res.data.get('priceUnit')
 
     margin_amount = balance * (equity_perc / 100.0)
     position_value = margin_amount * leverage
@@ -252,6 +345,7 @@ async def execute_signal_trade(data):
         f" Entry: {entry_label}\n"
         f" SL: {final_sl_price} (Set on Position )\n"
         f" TP1: {final_tp_price} (Set on Position )\n"
+        f" Note: TP2/TP3 ignored. Monitor running."
     )
 
 
@@ -261,22 +355,31 @@ async def handler(event):
         return
 
     text = event.text
-    if "PAIR:" in text and "SIDE:" in text:
-        print("\n Signal Detected! Parsing...")
+
+    if "PAIR:" in text:
+        print("\n  Message Detected! Parsing...")
         signal_data = parse_signal(text)
 
         if signal_data:
-            result = await execute_signal_trade(signal_data)
-            print(result)
-            await client.send_message('me', result)
+            if signal_data.get('type') == 'BREAKEVEN':
+                print(f"  Processing BREAKEVEN for {signal_data['symbol']}...")
+                result = await move_sl_to_entry(signal_data['symbol'])
+                print(result)
+                await client.send_message('me', result)
+
+            elif signal_data.get('type') == 'TRADE':
+                print(f"  Processing TRADE for {signal_data['symbol']}...")
+                result = await execute_signal_trade(signal_data)
+                print(result)
+                await client.send_message('me', result)
         else:
-            print(" Failed to parse signal data.")
+            print("  Failed to parse signal data.")
 
 
 if __name__ == "__main__":
     print("--------------------------------------")
-    print(" USER LISTENER STARTED (TP1 MODE) ")
-    print(f" Start Time: {START_TIME}")
+    print(" USER LISTENER STARTED ( BREAKEVEN MODE)")
+    print(f" Start Time (UTC): {START_TIME}")
     print(f" Watching Chats: {TARGET_CHATS}")
     print("---------------------------------------")
     client.start()

@@ -94,7 +94,7 @@ async def monitor_trade(symbol: str, start_vol: int, targets: list):
                 elif hit_labels:
                     reason = f" **{', '.join(sorted(hit_labels))} Hit** (All Closed)"
 
-                msg = f" **{symbol} Closed!**\nReason: {reason}\n🧹 Cleanup done."
+                msg = f" **{symbol} Closed!**\nReason: {reason}\n Cleanup done."
                 print(f"\n{msg}\n---------------------------------------")
                 await client.send_message('me', msg)
                 break
@@ -285,7 +285,7 @@ async def handler(event):
 
 if __name__ == "__main__":
     print("--------------------------------------")
-    print(" USER LISTENER STARTED")
+    print(" USER LISTENER STARTED (OLD ALL TP MODE)")
     print(f" Start Time (UTC): {START_TIME}")
     print(f" Watching Chats: {TARGET_CHATS}")
     print("---------------------------------------")
