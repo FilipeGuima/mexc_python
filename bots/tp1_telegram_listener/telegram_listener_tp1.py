@@ -3,8 +3,11 @@ import logging
 import re
 import math
 import time
+import os # Import os
 from datetime import datetime, timezone
 from telethon import TelegramClient, events
+from dotenv import load_dotenv # Import dotenv
+
 
 # --- IMPORTS ---
 from mexcpy.api import MexcFuturesAPI
@@ -12,13 +15,7 @@ from mexcpy.mexcTypes import (
     OrderSide, CreateOrderRequest, OpenType, OrderType,
     TriggerOrderRequest, TriggerType, TriggerPriceType, ExecuteCycle
 )
-
-# --- CONFIGURATION ---
-API_ID =
-API_HASH = ""
-TARGET_CHATS = [-]
-
-MEXC_TOKEN = ""
+from mexcpy.config import API_ID, API_HASH, TARGET_CHATS, MEXC_TOKEN, SESSION_FILE
 
 START_TIME = datetime.now(timezone.utc)
 
@@ -27,8 +24,7 @@ logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s
 logger = logging.getLogger(__name__)
 
 MexcAPI = MexcFuturesAPI(token=MEXC_TOKEN, testnet=True)
-client = TelegramClient('anon_session', API_ID, API_HASH)
-
+client = TelegramClient(str(SESSION_FILE), API_ID, API_HASH)
 
 # --- HELPER FUNCTIONS ---
 def adjust_price_to_step(price, step_size):

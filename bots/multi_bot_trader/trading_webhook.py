@@ -1,27 +1,37 @@
 import uvicorn
 import asyncio
 import logging
+import os
 from datetime import datetime
 from typing import Dict, Any
 from fastapi import FastAPI, Request, HTTPException
+from dotenv import load_dotenv
 
 from mexcpy.api import MexcFuturesAPI
 from mexcpy.mexcTypes import OrderSide, PositionType, CreateOrderRequest, OpenType, OrderType
 
-ACCOUNTS = {
-    "BOT1": {
-        "token": "",
-        "pair": "BTC_USDC"
-    },
-    "BOT2": {
-        "token": "",
-        "pair": "BTC_USDT"
-    },
-    "BOT3": {
-        "token": "REDACTED",
-        "pair": "DOGE_USDC"
+load_dotenv()
+
+ACCOUNTS = {}
+bot_index = 1
+
+while True:
+    token_key = f"BOT{bot_index}_TOKEN"
+    pair_key = f"BOT{bot_index}_PAIR"
+
+    token = os.getenv(token_key)
+    pair = os.getenv(pair_key)
+
+    if not token:
+        break
+
+    ACCOUNTS[f"BOT{bot_index}"] = {
+        "token": token,
+        "pair": pair
     }
-}
+    bot_index += 1
+
+print(f"Loaded {len(ACCOUNTS)} bots from configuration.")
 
 IS_TESTNET = True
 

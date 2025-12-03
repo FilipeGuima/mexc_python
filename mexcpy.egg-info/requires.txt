@@ -3,3 +3,4 @@ python-telegram-bot
 uvicorn
 fastapi
 python-dotenv
+telethon

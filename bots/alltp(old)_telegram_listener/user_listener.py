@@ -2,8 +2,11 @@ import asyncio
 import logging
 import re
 import math
+import time
+import os
 from datetime import datetime, timezone
 from telethon import TelegramClient, events
+from dotenv import load_dotenv
 
 # --- IMPORTS ---
 from mexcpy.api import MexcFuturesAPI
@@ -12,12 +15,20 @@ from mexcpy.mexcTypes import (
     TriggerOrderRequest, TriggerType, TriggerPriceType, ExecuteCycle
 )
 
-# --- CONFIGURATION ---
-API_ID =
-API_HASH = ""
-TARGET_CHATS = [-]
+load_dotenv()
 
-MEXC_TOKEN = ""
+# --- CONFIGURATION ---
+API_ID = int(os.getenv("API_ID", "0"))
+API_HASH = os.getenv("API_HASH", "")
+
+chats_str = os.getenv("TARGET_CHATS", "")
+TARGET_CHATS = [int(x.strip()) for x in chats_str.split(',') if x.strip()]
+
+MEXC_TOKEN = os.getenv("MEXC_TOKEN", "")
+
+if not MEXC_TOKEN or not API_ID:
+    print(" ERROR: Credentials missing. Please check your .env file.")
+    exit(1)
 
 START_TIME = datetime.now(timezone.utc)
 

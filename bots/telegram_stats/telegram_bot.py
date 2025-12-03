@@ -1,19 +1,27 @@
 import asyncio
 import logging
+import os
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters, Defaults
 from telegram.constants import ParseMode
 from datetime import datetime, timedelta
+from dotenv import load_dotenv # Import dotenv
 
 from mexcpy.api import MexcFuturesAPI
 from mexcpy.mexcTypes import OrderSide, PositionType, PositionInfo, CreateOrderRequest, OpenType, OrderType
 
-# --- CONFIGURATION ---
-TELEGRAM_TOKEN = "REDACTED"
-MEXC_TOKEN = "REDACTED"
+load_dotenv()
 
-# BTC_USDT
+# --- CONFIGURATION ---
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+MEXC_TOKEN = os.getenv("MEXC_TOKEN")
+
+if not TELEGRAM_TOKEN:
+    print(" ERROR: TELEGRAM_BOT_TOKEN not found in .env")
+    exit(1)
+
 DEFAULT_PAIR = "SUI_USDT"
+
 DEFAULT_MARGIN_PERC = 1.0
 DEFAULT_LEVERAGE = 20
 DEFAULT_TP_PERC = 1
