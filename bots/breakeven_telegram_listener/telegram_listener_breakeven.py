@@ -35,7 +35,9 @@ START_TIME = datetime.now(timezone.utc)
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-MexcAPI = MexcFuturesAPI(token=BREAKEVEN_TOKEN, testnet=True)
+IS_TESTNET = False
+
+MexcAPI = MexcFuturesAPI(token=BREAKEVEN_TOKEN, testnet=IS_TESTNET)
 client = TelegramClient(str(SESSION_BREAKEVEN), API_ID, API_HASH)
 
 # --- HELPER FUNCTIONS ---
@@ -389,4 +391,8 @@ if __name__ == "__main__":
     print(f" Watching Chats: {TARGET_CHATS}")
     print("---------------------------------------")
     client.start()
+
+    TESTNET_STATUS = "TRUE" if IS_TESTNET else "FALSE"
+    print(f"\nTESTNET STATUS: {TESTNET_STATUS}")
+
     client.run_until_disconnected()

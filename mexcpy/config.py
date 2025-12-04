@@ -30,5 +30,23 @@ SESSION_USER = SESSION_DIR / "user_listener_session"
 
 SESSION_MAIN = SESSION_DIR / "anon_session"
 
+# --- Logic for Stats Bots ---
+STATS_ACCOUNTS = []
+stats_bot_index = 1
+while True:
+    token_key = f"STATS_BOT{stats_bot_index}_TOKEN"
+
+    token = os.getenv(token_key)
+
+    if not token:
+        break
+
+    STATS_ACCOUNTS.append({
+        "account_id": f"BOT{stats_bot_index}",
+        "token": token,
+    })
+    stats_bot_index += 1
+
+
 if not API_ID or not API_HASH:
     print(f" WARNING: API_ID/HASH missing in {env_path}")
