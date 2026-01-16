@@ -13,16 +13,19 @@ from mexcpy.mexcTypes import (
     TriggerOrderRequest, TriggerType, TriggerPriceType, ExecuteCycle
 )
 from mexcpy.config import API_ID, API_HASH, TARGET_CHATS, TP1_TOKEN, SESSION_TP1
+
 START_TIME = datetime.now(timezone.utc)
 
 # --- SETUP ---
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-IS_TESTNET = False
+IS_TESTNET = True
 
 MexcAPI = MexcFuturesAPI(token=TP1_TOKEN, testnet=IS_TESTNET)
 client = TelegramClient(str(SESSION_TP1), API_ID, API_HASH)
+
+
 # --- HELPER FUNCTIONS ---
 def adjust_price_to_step(price, step_size):
     if not price:
@@ -60,7 +63,6 @@ async def monitor_trade(symbol: str, start_vol: int, targets: list):
 
             if not pos_res.data:
                 await asyncio.sleep(2)
-
                 stop_res = await MexcAPI.get_stop_limit_orders(
                     symbol=symbol,
                     is_finished=1,
@@ -77,7 +79,6 @@ async def monitor_trade(symbol: str, start_vol: int, targets: list):
 
                     if sorted_stops:
                         last_stop = sorted_stops[0]
-
                         if isinstance(last_stop, dict):
                             up_time = last_stop.get('updateTime', 0)
                             state = last_stop.get('state')
@@ -99,7 +100,7 @@ async def monitor_trade(symbol: str, start_vol: int, targets: list):
 
                 msg = f" **{symbol} Closed!**\nReason: {reason}\n"
                 print(f"\n{msg}\n---------------------------------------")
-                await client.send_message('me', msg)
+                # await client.send_message('me', msg)
                 break
 
             position = pos_res.data[0]
@@ -120,64 +121,149 @@ async def monitor_trade(symbol: str, start_vol: int, targets: list):
             await asyncio.sleep(5)
 
 
-def parse_signal(text: str):
-    try:
-        print(f" DEBUG RAW: {text}")
+# --- PARSERS ---
 
-        text_clean = text.encode('ascii', 'ignore').decode('ascii')
-        text_clean = text_clean.replace('*', '').replace(',', '')
+class SignalParser:
+    """
+    Robust signal parser for NEW TRADES.
+    Handles: "PAIR: BTC/USDT", "SIDE: LONG", "TP1: 0.55", ignoring "R:R" ratios.
+    """
+    NUM_PATTERN = r'([\d,]+\.?\d*)'
 
+    @staticmethod
+    def _extract_number(text: str) -> float | None:
+        if not text: return None
+        cleaned = text.replace(',', '')
+        try:
+            return float(cleaned)
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _normalize_text(text: str) -> str:
+        return text.upper()
+
+    @classmethod
+    def parse(cls, text: str, debug: bool = True) -> dict | None:
+        if debug: print(f" DEBUG RAW: {repr(text)}")
+        text_upper = cls._normalize_text(text)
         data = {}
 
-        pair_match = re.search(r"PAIR:\s*([A-Z0-9]+)[/_]([A-Z0-9]+)", text_clean, re.IGNORECASE)
+        # --- PAIR ---
+        pair_match = re.search(r'PAIR[\W_]*([A-Z0-9]+)[\W_]*[/_:-]?[\W_]*([A-Z0-9]+)', text_upper)
         if not pair_match:
-            print(" Parsing failed: No PAIR found.")
+            if debug: print(" Parsing failed: No PAIR found.")
             return None
-        data['symbol'] = f"{pair_match.group(1)}_{pair_match.group(2)}".upper()
+        data['symbol'] = f"{pair_match.group(1)}_{pair_match.group(2)}"
 
-        size_match = re.search(r"SIZE:\s*(\d+)(?:-\s*(\d+))?%", text_clean, re.IGNORECASE)
+        # --- SIDE ---
+        side_match = re.search(r'SIDE[\W_]*(LONG|SHORT)', text_upper)
+        if not side_match:
+            if debug: print(" Parsing failed: No SIDE found.")
+            return None
+        direction = side_match.group(1)
+        data['side'] = OrderSide.OpenLong if direction == "LONG" else OrderSide.OpenShort
 
+        # --- SIZE ---
+        size_match = re.search(r'SIZE[\W_]*(\d+)[\W_]*(?:-[\W_]*(\d+))?[\W_]*%', text_upper)
         if size_match:
             val1 = float(size_match.group(1))
             val2 = float(size_match.group(2)) if size_match.group(2) else val1
             data['equity_perc'] = (val1 + val2) / 2
+        else:
+            data['equity_perc'] = 1.0
 
-        side_match = re.search(r"SIDE:\s*(LONG|SHORT)", text_clean, re.IGNORECASE)
-        if not side_match:
-            print(" Parsing failed: No SIDE (LONG/SHORT) found.")
-            return None
+        # --- ENTRY ---
+        entry_match = re.search(r'ENTRY[\W_]*' + cls.NUM_PATTERN + r'(?:[\W_]*-[\W_]*' + cls.NUM_PATTERN + r')?',
+                                text_upper)
+        if entry_match:
+            entry1 = cls._extract_number(entry_match.group(1))
+            entry2 = cls._extract_number(entry_match.group(2))
+            if entry1 and entry2:
+                data['entry'] = (entry1 + entry2) / 2
+            elif entry1:
+                data['entry'] = entry1
+            else:
+                data['entry'] = "Market"
+        else:
+            data['entry'] = "Market"
 
-        direction = side_match.group(1).upper()
-        data['side'] = OrderSide.OpenLong if direction == "LONG" else OrderSide.OpenShort
+        # --- STOP LOSS ---
+        sl_match = re.search(r'SL[\W_]*' + cls.NUM_PATTERN, text_upper)
+        data['sl'] = cls._extract_number(sl_match.group(1)) if sl_match else None
 
-        entry_match = re.search(r"ENTRY:\s*([\d.]+)", text_clean, re.IGNORECASE)
-        data['entry'] = float(entry_match.group(1)) if entry_match else "Market"
-
-        sl_match = re.search(r"SL:\s*([\d.]+)", text_clean, re.IGNORECASE)
-        data['sl'] = float(sl_match.group(1)) if sl_match else None
-
-        lev_match = re.search(r"LEVERAGE:\s*(\d+)", text_clean, re.IGNORECASE)
+        # --- LEVERAGE ---
+        lev_match = re.search(r'LEV(?:ERAGE)?[\W_]*(\d+)', text_upper)
         data['leverage'] = int(lev_match.group(1)) if lev_match else 20
 
-
-        all_tps = re.findall(r"TP\d:\s*([\d.]+)", text_clean, re.IGNORECASE)
+        # --- TAKE PROFIT TARGETS ---
+        tp_matches = re.findall(r'TP\d[\W_]*' + cls.NUM_PATTERN + r'(?!\s*R:R)', text_upper)
 
         real_tps = []
-        if all_tps:
-            limit = 3 if len(all_tps) >= 6 else len(all_tps)
-            real_tps = [float(tp) for tp in all_tps[:limit]]
+        for tp_str in tp_matches:
+            tp_val = cls._extract_number(tp_str)
+            if tp_val:
+                real_tps.append(tp_val)
 
-        data['tps'] = real_tps
-
+        data['tps'] = real_tps[:3]
+        if debug: print(f" PARSED SIGNAL: {data}")
         return data
-    except Exception as e:
-        logger.error(f"Parse Error: {e}")
-        import traceback
-        traceback.print_exc()
+
+
+class UpdateParser:
+    """
+    Parses 'Update' messages like:
+    "ASTER/USDT #1175 change TP1 to 0.75222"
+    "BTC/USDT change SL to 94000"
+    """
+
+    @staticmethod
+    def parse(text: str, debug: bool = True) -> dict | None:
+        text_upper = text.upper()
+
+        if not any(k in text_upper for k in ["CHANGE", "ADJUST", "MOVE", "SET", "UPDATE"]):
+            return None
+
+        data = {}
+
+        pair_match = re.search(r'([A-Z0-9]+)[\W_]*[/_:-][\W_]*([A-Z0-9]+)', text_upper)
+        if not pair_match:
+            if debug: print(" Update detected but NO PAIR found. Ignoring.")
+            return None
+
+        data['symbol'] = f"{pair_match.group(1)}_{pair_match.group(2)}"
+
+
+        sl_match = re.search(r'(?:SL|STOP(?:\s*LOSS)?)\W+(?:IS\W+)?(?:NOW|TO|BE)\W+([\d,.]+)', text_upper)
+        if sl_match:
+            data['type'] = 'SL'
+            data['price'] = float(sl_match.group(1).replace(',', ''))
+            if debug: print(f" PARSED UPDATE: {data}")
+            return data
+
+        tp_match = re.search(r'(TP\d?)\W+(?:IS\W+)?(?:NOW|TO|BE)\W+([\d,.]+)', text_upper)
+        if tp_match:
+            data['type'] = tp_match.group(1)
+            data['price'] = float(tp_match.group(2).replace(',', ''))
+            if debug: print(f" PARSED UPDATE: {data}")
+            return data
+
         return None
 
 
+def parse_signal(text: str) -> dict | None:
+    """Wrapper for backward compatibility"""
+    try:
+        return SignalParser.parse(text, debug=True)
+    except Exception as e:
+        logger.error(f"Parse Error: {e}")
+        return None
+
+
+# --- EXECUTION FUNCTIONS ---
+
 async def execute_signal_trade(data):
+    """Executes a NEW trade"""
     symbol = data['symbol']
     leverage = data['leverage']
     side = data['side']
@@ -241,29 +327,158 @@ async def execute_signal_trade(data):
     return (
         f" SUCCESS: {symbol} {side.name} x{leverage}\n"
         f"---------------------------------------\n"
-        f" Pos Size: {equity_perc}% (Midpoint) | Vol: {vol}\n"
-        f" Entry: {entry_label}\n"
-        f" SL: {final_sl_price} (Set on Position )\n"
-        f" TP1: {final_tp_price} (Set on Position )\n"
+        f" Vol: {vol} | Entry: {entry_label}\n"
+        f" SL: {final_sl_price} | TP1: {final_tp_price}\n"
     )
 
 
+async def execute_update_signal(data):
+    """
+    Executes an UPDATE by MODIFYING the existing Position TP/SL order.
+    Handles both regular stop orders and position plan orders (Side=0).
+    """
+    symbol = data['symbol']
+    update_type = data['type']
+    new_price_raw = data['price']
+
+    print(f"  PROCESSING UPDATE: {symbol} {update_type} -> {new_price_raw}")
+
+    pos_res = await MexcAPI.get_open_positions(symbol)
+    if not pos_res.success or not pos_res.data:
+        return f"  Update Ignored: No open position found for {symbol}"
+
+    contract_res = await MexcAPI.get_contract_details(symbol)
+    price_step = contract_res.data.get('priceUnit') if contract_res.success else 0.01
+    final_price = adjust_price_to_step(new_price_raw, price_step)
+
+    orders_res = await MexcAPI.get_stop_limit_orders(symbol=symbol, is_finished=0)
+
+    target_order = None
+
+    if orders_res.success and orders_res.data:
+        print(f" DEBUG: Found {len(orders_res.data)} active stop-limit orders.")
+
+        for order in orders_res.data:
+            is_dict = isinstance(order, dict)
+
+            order_id = order.get('orderId') if is_dict else getattr(order, 'orderId', None)
+            plan_id = order.get('id') if is_dict else getattr(order, 'id', None)
+            t_side = order.get('triggerSide') if is_dict else getattr(order, 'triggerSide', None)
+
+            side_val = t_side.value if hasattr(t_side, 'value') else (t_side or 0)
+
+            curr_sl = order.get('stopLossPrice') if is_dict else getattr(order, 'stopLossPrice', None)
+            curr_tp = order.get('takeProfitPrice') if is_dict else getattr(order, 'takeProfitPrice', None)
+
+            print(f"    - ID={plan_id or order_id} | Side={side_val} | SL={curr_sl} | TP={curr_tp}")
+
+            # SELECTION LOGIC:
+            # Side 0 = Position Plan Order (contains both TP and SL) - MOST COMMON
+            # Side 1 = Take Profit Order only
+            # Side 2 = Stop Loss Order only
+
+            match_found = False
+
+            if side_val == 0:
+                match_found = True
+                print("      -> Selected (Position TP/SL Plan)")
+            elif update_type == 'SL' and side_val == 2:
+                match_found = True
+            elif 'TP' in update_type and side_val == 1:
+                match_found = True
+
+            if match_found:
+                target_order = {
+                    'order_id': order_id,
+                    'plan_id': plan_id,
+                    'side': side_val,
+                    'curr_sl': curr_sl,
+                    'curr_tp': curr_tp,
+                }
+                break
+    else:
+        print(f" 🔎 DEBUG: No active stop-limit orders found.")
+
+    if not target_order:
+        return f"  Update Skipped: No existing {update_type} order found to modify."
+
+    use_plan_api = target_order['side'] == 0 or target_order['plan_id']
+    order_id_to_use = target_order['plan_id'] or target_order['order_id']
+
+    if update_type == 'SL':
+        new_sl = final_price
+        new_tp = target_order['curr_tp']
+    else:
+        new_sl = target_order['curr_sl']
+        new_tp = final_price
+
+    print(f" Modifying Order {order_id_to_use}: SL={new_sl}, TP={new_tp}")
+
+    try:
+        if use_plan_api:
+            print(f"    Using: update_stop_limit_trigger_plan_price (Plan Order)")
+            res = await MexcAPI.update_stop_limit_trigger_plan_price(
+                stop_plan_order_id=order_id_to_use,
+                stop_loss_price=new_sl,
+                take_profit_price=new_tp
+            )
+        else:
+            print(f"    Using: change_stop_limit_trigger_price (Regular Order)")
+            res = await MexcAPI.change_stop_limit_trigger_price(
+                order_id=order_id_to_use,
+                stop_loss_price=new_sl,
+                take_profit_price=new_tp
+            )
+
+        if res.success:
+            return f" SUCCESS: {symbol} {update_type} updated to {final_price}"
+        else:
+            if use_plan_api:
+                print(f"    Plan API failed ({res.message}), trying regular API...")
+                res = await MexcAPI.change_stop_limit_trigger_price(
+                    order_id=order_id_to_use,
+                    stop_loss_price=new_sl,
+                    take_profit_price=new_tp
+                )
+                if res.success:
+                    return f"  SUCCESS: {symbol} {update_type} updated to {final_price}"
+
+            return f"  MODIFICATION FAILED: {res.message}"
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return f"  Error calling modification API: {e}"
+
+
+
+# --- TELEGRAM HANDLER ---
+
 @client.on(events.NewMessage(chats=TARGET_CHATS, incoming=True))
 async def handler(event):
-    if event.date < START_TIME:
-        return
-
+    if event.date < START_TIME: return
     text = event.text
-    if "PAIR:" in text and "SIDE:" in text:
-        print("\n Signal Detected! Parsing...")
-        signal_data = parse_signal(text)
+    if not text: return
 
+    text_upper = text.upper()
+
+    if "PAIR" in text_upper and "SIDE" in text_upper:
+        print("\n  New Signal Detected!")
+        signal_data = parse_signal(text)
         if signal_data:
             result = await execute_signal_trade(signal_data)
             print(result)
-            await client.send_message('me', result)
+        return
+
+    if any(k in text_upper for k in ["CHANGE", "ADJUST", "MOVE", "SET"]) and "/" in text:
+        print("\n  Update Signal Detected!")
+        update_data = UpdateParser.parse(text)
+
+        if update_data:
+            result = await execute_update_signal(update_data)
+            print(result)
         else:
-            print(" Failed to parse signal data.")
+            print(" Update detected but failed to parse details.")
 
 
 if __name__ == "__main__":

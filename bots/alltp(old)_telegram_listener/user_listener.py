@@ -110,7 +110,7 @@ async def monitor_trade(symbol: str, start_vol: int, targets: list):
 
                 msg = f" **{symbol} Closed!**\nReason: {reason}\n Cleanup done."
                 print(f"\n{msg}\n---------------------------------------")
-                await client.send_message('me', msg)
+                # await client.send_message('me', msg)
                 break
 
             position = pos_res.data[0]
@@ -125,7 +125,7 @@ async def monitor_trade(symbol: str, start_vol: int, targets: list):
                 diff = last_vol - current_vol
                 msg = f" **{symbol} Partial TP Hit!**\n   Reduced by {diff} contracts.\n   Remaining: {current_vol}"
                 print(f"\n{msg}\n---------------------------------------")
-                await client.send_message('me', msg)
+                # await client.send_message('me', msg)
                 last_vol = current_vol
 
             if current_vol > last_vol:
@@ -292,7 +292,7 @@ async def handler(event):
         if signal_data:
             result = await execute_signal_trade(signal_data)
             print(result)
-            await client.send_message('me', result)
+            # await client.send_message('me', result)
         else:
             print(" Failed to parse signal data.")
 

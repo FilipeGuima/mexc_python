@@ -8,6 +8,10 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 env_path = BASE_DIR / ".env"
 load_dotenv(env_path)
 
+BLOFIN_API_KEY = os.getenv("BLOFIN_API_KEY")
+BLOFIN_SECRET_KEY = os.getenv("BLOFIN_SECRET_KEY")
+BLOFIN_PASSPHRASE = os.getenv("BLOFIN_PASSPHRASE")
+
 API_ID = int(os.getenv("API_ID", "0"))
 API_HASH = os.getenv("API_HASH", "")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")

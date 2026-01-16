@@ -214,7 +214,7 @@ async def monitor_trade(symbol: str, start_vol: int, targets: list = None):
 
                 msg = f" **{symbol} Closed!**\nReason: {reason}\n Cleanup done."
                 print(f"\n{msg}\n---------------------------------------")
-                await client.send_message('me', msg)
+                # await client.send_message('me', msg)
 
                 await MexcAPI.cancel_all_orders(symbol=symbol)
                 break
@@ -431,13 +431,13 @@ async def handler(event):
             print(f"  Processing BREAKEVEN for {symbol}...")
             res = await move_sl_to_entry(symbol)
             print(res)
-            await client.send_message('me', res)
+            # await client.send_message('me', res)
 
         elif result['type'] == 'TRADE':
             print(f"  Processing TRADE for {symbol}...")
             res = await execute_signal_trade(result)
             print(res)
-            await client.send_message('me', res)
+            # await client.send_message('me', res)
 
 
 if __name__ == "__main__":
