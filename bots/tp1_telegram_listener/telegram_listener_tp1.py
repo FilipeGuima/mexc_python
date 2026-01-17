@@ -41,7 +41,43 @@ def adjust_price_to_step(price, step_size):
     return round(price, precision)
 
 
-async def monitor_trade(symbol: str, start_vol: int, targets: list):
+async def monitor_trade(symbol: str, start_vol: int, targets: list, is_limit_order: bool = False):
+    """
+    Monitors an open position for TP/SL hits.
+    If is_limit_order=True, first waits for the limit order to fill before monitoring.
+    """
+    if is_limit_order:
+        print(f" Waiting for limit order to fill for {symbol}...")
+        fill_wait_count = 0
+        max_wait_cycles = 720  # ~1 hour at 5s intervals
+
+        while fill_wait_count < max_wait_cycles:
+            await asyncio.sleep(5)
+            fill_wait_count += 1
+
+            try:
+                pos_res = await MexcAPI.get_open_positions(symbol)
+                if pos_res.success and pos_res.data:
+                    print(f" Limit order FILLED for {symbol}! Position now open.")
+                    start_vol = pos_res.data[0].holdVol
+                    break
+
+                # Check if order was cancelled
+                orders_res = await MexcAPI.get_current_pending_orders(symbol=symbol)
+                if orders_res.success:
+                    has_pending = len(orders_res.data or []) > 0
+                    if not has_pending:
+                        # No position and no pending order = order was cancelled
+                        print(f" Limit order for {symbol} was CANCELLED or EXPIRED. Stopping monitor.")
+                        return
+
+            except Exception as e:
+                print(f" Error checking limit order status: {e}")
+
+        else:
+            print(f" Limit order for {symbol} did not fill within timeout. Stopping monitor.")
+            return
+
     print(f" Auto-monitoring started for {symbol}... \n---------------------------------------")
 
     last_vol = start_vol
@@ -263,12 +299,19 @@ def parse_signal(text: str) -> dict | None:
 # --- EXECUTION FUNCTIONS ---
 
 async def execute_signal_trade(data):
-    """Executes a NEW trade"""
+    """
+    Executes a NEW trade with smart entry logic:
+    - LONG: If current price <= entry price -> market order (getting better price)
+            If current price > entry price -> limit order at entry (wait for pullback)
+    - SHORT: If current price >= entry price -> market order (getting better price)
+             If current price < entry price -> limit order at entry (wait for bounce)
+    - Market entry: Always execute immediately
+    """
     symbol = data['symbol']
     leverage = data['leverage']
     side = data['side']
     equity_perc = data['equity_perc']
-    entry_label = data['entry']
+    entry_value = data['entry']
 
     sl_price_raw = data.get('sl')
     tp1_price_raw = data['tps'][0] if data['tps'] else None
@@ -303,32 +346,75 @@ async def execute_signal_trade(data):
 
     if vol == 0: return f" Vol is 0. (Bal: {balance:.2f} {quote_currency}, Lev: {leverage})"
 
-    logger.info(f" Executing {side.name} {symbol} x{leverage} | Vol: {vol}")
-
     final_sl_price = adjust_price_to_step(sl_price_raw, price_step)
     final_tp_price = adjust_price_to_step(tp1_price_raw, price_step)
 
-    open_req = CreateOrderRequest(
-        symbol=symbol,
-        side=side,
-        vol=vol,
-        leverage=leverage,
-        openType=OpenType.Cross,
-        type=OrderType.MarketOrder,
-        stopLossPrice=final_sl_price,
-        takeProfitPrice=final_tp_price
-    )
+    # Determine order type based on entry logic
+    use_market_order = True
+    entry_price = None
+    order_reason = "Market Entry"
+
+    if entry_value != "Market" and isinstance(entry_value, (int, float)):
+        entry_price = adjust_price_to_step(entry_value, price_step)
+        is_long = side == OrderSide.OpenLong
+
+        if is_long:
+            if current_price <= entry_price:
+                # Current price is at or below entry - buy now for better entry
+                use_market_order = True
+                order_reason = f"MARKET (price {current_price} <= entry {entry_price})"
+            else:
+                # Current price is above entry - use limit order to wait for pullback
+                use_market_order = False
+                order_reason = f"LIMIT @ {entry_price} (waiting for pullback from {current_price})"
+        else:  # SHORT
+            if current_price >= entry_price:
+                # Current price is at or above entry - sell now for better entry
+                use_market_order = True
+                order_reason = f"MARKET (price {current_price} >= entry {entry_price})"
+            else:
+                # Current price is below entry - use limit order to wait for bounce
+                use_market_order = False
+                order_reason = f"LIMIT @ {entry_price} (waiting for bounce from {current_price})"
+
+    logger.info(f" Executing {side.name} {symbol} x{leverage} | Vol: {vol} | {order_reason}")
+
+    if use_market_order:
+        open_req = CreateOrderRequest(
+            symbol=symbol,
+            side=side,
+            vol=vol,
+            leverage=leverage,
+            openType=OpenType.Cross,
+            type=OrderType.MarketOrder,
+            stopLossPrice=final_sl_price,
+            takeProfitPrice=final_tp_price
+        )
+    else:
+        open_req = CreateOrderRequest(
+            symbol=symbol,
+            side=side,
+            vol=vol,
+            leverage=leverage,
+            openType=OpenType.Cross,
+            type=OrderType.PriceLimited,
+            price=entry_price,
+            stopLossPrice=final_sl_price,
+            takeProfitPrice=final_tp_price
+        )
 
     order_res = await MexcAPI.create_order(open_req)
     if not order_res.success: return f" Open Failed: {order_res.message}"
 
-    asyncio.create_task(monitor_trade(symbol, vol, data['tps']))
+    asyncio.create_task(monitor_trade(symbol, vol, data['tps'], is_limit_order=not use_market_order))
 
+    order_type_str = "MARKET" if use_market_order else f"LIMIT @ {entry_price}"
     return (
         f" SUCCESS: {symbol} {side.name} x{leverage}\n"
         f"---------------------------------------\n"
-        f" Vol: {vol} | Entry: {entry_label}\n"
+        f" Vol: {vol} | Order: {order_type_str}\n"
         f" SL: {final_sl_price} | TP1: {final_tp_price}\n"
+        f" Reason: {order_reason}\n"
     )
 
 
