@@ -268,5 +268,65 @@ class BlofinFuturesAPI:
             return resp["data"] if isinstance(resp["data"], list) else []
         return []
 
+    async def get_order_history(self, symbol: Optional[str] = None, order_id: Optional[str] = None) -> List[Dict]:
+        """Get order history (filled/cancelled orders)."""
+        params = {"instType": "SWAP"}
+        if symbol:
+            params["instId"] = symbol
+        if order_id:
+            params["orderId"] = order_id
+
+        resp = await self._make_request("GET", "/api/v1/trade/orders-history", params=params)
+
+        if resp.get("code") == "0" and "data" in resp:
+            return resp["data"] if isinstance(resp["data"], list) else []
+        return []
+
+    async def get_fills(self, symbol: Optional[str] = None, order_id: Optional[str] = None) -> List[Dict]:
+        """Get trade fills/executions."""
+        params = {"instType": "SWAP"}
+        if symbol:
+            params["instId"] = symbol
+        if order_id:
+            params["orderId"] = order_id
+
+        resp = await self._make_request("GET", "/api/v1/trade/fills", params=params)
+
+        if resp.get("code") == "0" and "data" in resp:
+            return resp["data"] if isinstance(resp["data"], list) else []
+        return []
+
     async def cancel_all_orders(self, symbol: Optional[str] = None):
         pass
+
+    async def cancel_tpsl_order(self, symbol: str, tpsl_id: str):
+        """Cancel a specific TPSL order."""
+        body = {
+            "instId": symbol,
+            "tpslId": tpsl_id
+        }
+        return await self._make_request("POST", "/api/v1/trade/cancel-tpsl", body=body)
+
+    async def amend_tpsl_order(
+            self,
+            symbol: str,
+            tpsl_id: str,
+            new_size: Optional[str] = None,
+            new_tp_trigger_price: Optional[float] = None,
+            new_sl_trigger_price: Optional[float] = None
+    ):
+        """Amend an existing TPSL order."""
+        body = {
+            "instId": symbol,
+            "tpslId": tpsl_id
+        }
+        if new_size:
+            body["newSize"] = str(new_size)
+        if new_tp_trigger_price:
+            body["newTpTriggerPrice"] = str(new_tp_trigger_price)
+            body["newTpOrderPrice"] = "-1"
+        if new_sl_trigger_price:
+            body["newSlTriggerPrice"] = str(new_sl_trigger_price)
+            body["newSlOrderPrice"] = "-1"
+
+        return await self._make_request("POST", "/api/v1/trade/amend-tpsl", body=body)

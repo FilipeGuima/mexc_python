@@ -71,6 +71,9 @@ async def monitor_order_fills():
     """
     Background task that monitors pending limit orders.
     When an order fills, it sends a notification and sets up TP/SL.
+
+    Note: Blofin Demo API doesn't support get_open_positions, so we detect fills
+    by monitoring when orders disappear from pending orders list or show filledSize > 0.
     """
     global pending_orders
 
@@ -79,93 +82,79 @@ async def monitor_order_fills():
             if pending_orders:
                 orders_to_remove = []
 
+                # Get ALL pending orders once per cycle
+                all_pending = await BlofinAPI.get_pending_orders()
+
                 for order_id, order_info in list(pending_orders.items()):
                     symbol = order_info['symbol']
 
-                    # Check if position exists for this symbol
-                    positions = await BlofinAPI.get_open_positions(symbol)
+                    # Find our order in pending orders
+                    our_order = None
+                    for o in all_pending:
+                        if str(o.get('orderId')) == str(order_id):
+                            our_order = o
+                            break
 
-                    # Also check the actual pending orders to see if our order is still there
-                    all_pending = await BlofinAPI.get_pending_orders()  # Get ALL pending orders
-                    our_order_pending = any(str(o.get('orderId')) == str(order_id) for o in all_pending)
+                    if our_order:
+                        # Order still exists - check if partially or fully filled
+                        filled_size = float(our_order.get('filledSize', 0))
+                        state = our_order.get('state', '')
+                        avg_price = our_order.get('averagePrice', order_info.get('entry_price', 0))
 
-                    if positions and len(positions) > 0:
-                        # Order filled! Position is now open
-                        position = positions[0]
-
-                        fill_msg = (
-                            f"🚀 **LIMIT ORDER FILLED!**\n"
-                            f"   Symbol: {symbol}\n"
-                            f"   Side: {order_info['side'].upper()}\n"
-                            f"   Entry: {position.openAvgPrice}\n"
-                            f"   Size: {position.holdVol}\n"
-                            f"   Lev: x{position.leverage}\n"
-                        )
-
-                        # Set up TP/SL via separate call (since Blofin ignores them on order)
-                        tp_price = order_info.get('tp')
-                        sl_price = order_info.get('sl')
-
-                        if tp_price or sl_price:
-                            tpsl_side = "sell" if order_info['side'] == "buy" else "buy"
-
-                            tpsl_body = {
-                                "instId": symbol,
-                                "marginMode": "isolated",
-                                "posSide": "net",
-                                "side": tpsl_side,
-                                "size": str(position.holdVol),
-                                "reduceOnly": "true",
-                            }
-
-                            if tp_price:
-                                tpsl_body["tpTriggerPrice"] = str(tp_price)
-                                tpsl_body["tpOrderPrice"] = "-1"
-
-                            if sl_price:
-                                tpsl_body["slTriggerPrice"] = str(sl_price)
-                                tpsl_body["slOrderPrice"] = "-1"
-
-                            tpsl_res = await BlofinAPI._make_request("POST", "/api/v1/trade/order-tpsl", body=tpsl_body)
-
-                            if tpsl_res and tpsl_res.get('code') == "0":
-                                fill_msg += f"   ✓ TP/SL Set Successfully\n"
-                                if tp_price:
-                                    fill_msg += f"   TP: {tp_price}\n"
-                                if sl_price:
-                                    fill_msg += f"   SL: {sl_price}\n"
-                            else:
-                                error = tpsl_res.get('msg', 'Unknown') if tpsl_res else 'No response'
-                                fill_msg += f"   ⚠️ TP/SL Failed: {error}\n"
-
-                        logger.info(f"Order {order_id} filled for {symbol}")
-                        print(f"\n{fill_msg}")
-
-                        # Send notification to Telegram
-                        # try:
-                        #     await client.send_message('me', fill_msg)
-                        # except Exception as e:
-                        #     logger.error(f"Failed to send fill notification: {e}")
-
-                        orders_to_remove.append(order_id)
-
-                    elif our_order_pending:
-                        # Order still pending, keep monitoring
-                        logger.debug(f"Order {order_id} still pending for {symbol}")
-
-                    else:
-                        # No position AND order not in pending list = cancelled
-                        # But increment a counter to avoid false positives
-                        check_count = order_info.get('_check_count', 0) + 1
-                        order_info['_check_count'] = check_count
-
-                        if check_count >= 3:  # Only mark as cancelled after 3 checks (15 seconds)
-                            logger.info(f"Order {order_id} for {symbol} appears to be cancelled")
+                        if filled_size > 0 and state == 'filled':
+                            # Order filled! Set TP/SL
+                            logger.info(f"Order {order_id} FILLED: size={filled_size}, price={avg_price}")
+                            await _set_tpsl_for_filled_order(order_info, filled_size, avg_price)
                             orders_to_remove.append(order_id)
 
+                        else:
+                            # Order still pending/live
+                            logger.debug(f"Order {order_id} still pending for {symbol} (state={state})")
+
+                    else:
+                        # Order not in pending list - check order history
+                        history = await BlofinAPI.get_order_history(symbol=symbol, order_id=order_id)
+
+                        if history:
+                            hist_order = history[0] if isinstance(history, list) else history
+                            state = hist_order.get('state', '')
+                            filled_size = float(hist_order.get('filledSize', 0))
+                            avg_price = float(hist_order.get('averagePrice', 0)) or order_info.get('entry_price')
+
+                            if state == 'filled' and filled_size > 0:
+                                logger.info(f"Order {order_id} confirmed FILLED via history: size={filled_size}, price={avg_price}")
+                                await _set_tpsl_for_filled_order(order_info, filled_size, avg_price)
+                                orders_to_remove.append(order_id)
+                            elif state in ['cancelled', 'canceled']:
+                                logger.info(f"Order {order_id} was CANCELLED")
+                                print(f"\n Order {order_id} for {symbol} was cancelled.")
+                                orders_to_remove.append(order_id)
+                            else:
+                                # Unknown state - wait a bit more
+                                check_count = order_info.get('_check_count', 0) + 1
+                                order_info['_check_count'] = check_count
+                                if check_count >= 3:
+                                    logger.warning(f"Order {order_id} in unknown state: {state}")
+                                    orders_to_remove.append(order_id)
+                        else:
+                            # No history yet - might be processing
+                            check_count = order_info.get('_check_count', 0) + 1
+                            order_info['_check_count'] = check_count
+
+                            if check_count >= 3:
+                                # Order disappeared with no history - assume filled
+                                logger.info(f"Order {order_id} disappeared (no history) - assuming filled")
+                                await _set_tpsl_for_filled_order(
+                                    order_info,
+                                    order_info.get('size'),
+                                    order_info.get('entry_price')
+                                )
+                                orders_to_remove.append(order_id)
+
                 # Remove processed orders
-                for order_id in orders_to_remove:
-                    del pending_orders[order_id]
+                for oid in orders_to_remove:
+                    if oid in pending_orders:
+                        del pending_orders[oid]
 
             await asyncio.sleep(5)  # Check every 5 seconds
 
@@ -176,10 +165,87 @@ async def monitor_order_fills():
             await asyncio.sleep(10)
 
 
+async def _set_tpsl_for_filled_order(order_info: dict, filled_size: float, fill_price: float):
+    """Helper to set TP/SL after a limit order fills."""
+    symbol = order_info['symbol']
+    tp_price = order_info.get('tp')
+    sl_price = order_info.get('sl')
+
+    fill_msg = (
+        f"🚀 **LIMIT ORDER FILLED!**\n"
+        f"   Symbol: {symbol}\n"
+        f"   Side: {order_info['side'].upper()}\n"
+        f"   Entry: {fill_price}\n"
+        f"   Size: {filled_size}\n"
+        f"   Lev: x{order_info.get('leverage', 'N/A')}\n"
+    )
+
+    if tp_price or sl_price:
+        tpsl_side = "sell" if order_info['side'] == "buy" else "buy"
+        position_side = "long" if order_info['side'] == "buy" else "short"
+
+        # Set TP and SL separately for reliability
+        tpsl_success = []
+        tpsl_errors = []
+
+        if tp_price:
+            tp_body = {
+                "instId": symbol,
+                "marginMode": "isolated",
+                "posSide": position_side,
+                "side": tpsl_side,
+                "size": str(filled_size),
+                "reduceOnly": "true",
+                "tpTriggerPrice": str(tp_price),
+                "tpOrderPrice": "-1"
+            }
+            logger.info(f" Setting TP for filled order: {tp_body}")
+            tp_res = await BlofinAPI._make_request("POST", "/api/v1/trade/order-tpsl", body=tp_body)
+            logger.info(f" TP Response: {tp_res}")
+
+            if tp_res and tp_res.get('code') == "0":
+                tpsl_success.append(f"TP: {tp_price}")
+                fill_msg += f"   TP: {tp_price}\n"
+            else:
+                error = tp_res.get('msg', 'Unknown') if tp_res else 'No response'
+                tpsl_errors.append(f"TP: {error}")
+
+        if sl_price:
+            sl_body = {
+                "instId": symbol,
+                "marginMode": "isolated",
+                "posSide": position_side,
+                "side": tpsl_side,
+                "size": str(filled_size),
+                "reduceOnly": "true",
+                "slTriggerPrice": str(sl_price),
+                "slOrderPrice": "-1"
+            }
+            logger.info(f" Setting SL for filled order: {sl_body}")
+            sl_res = await BlofinAPI._make_request("POST", "/api/v1/trade/order-tpsl", body=sl_body)
+            logger.info(f" SL Response: {sl_res}")
+
+            if sl_res and sl_res.get('code') == "0":
+                tpsl_success.append(f"SL: {sl_price}")
+                fill_msg += f"   SL: {sl_price}\n"
+            else:
+                error = sl_res.get('msg', 'Unknown') if sl_res else 'No response'
+                tpsl_errors.append(f"SL: {error}")
+
+        if tpsl_success:
+            fill_msg += f"   ✓ Set: {', '.join(tpsl_success)}\n"
+        if tpsl_errors:
+            fill_msg += f"   ⚠️ Failed: {'; '.join(tpsl_errors)}\n"
+    else:
+        fill_msg += "   (No TP/SL configured)\n"
+
+    print(f"\n{fill_msg}")
+
+
 async def move_sl_to_entry(symbol: str):
     """
     Logic:
-    1. Check if we have an open position for the symbol.
+    1. Check if we have an open position for the symbol (try API, fallback to TPSL orders).
     2. Identify the entry price.
     3. Update the Stop Loss (SL) to the entry price to 'break even'.
     """
@@ -188,47 +254,67 @@ async def move_sl_to_entry(symbol: str):
     # Blofin symbols usually use dashes (BTC-USDT). Ensure format is correct.
     formatted_symbol = symbol.replace('_', '-')
 
-    # 1. Get Open Positions
+    # 1. Try to get position info (may fail on demo)
+    entry_price = None
+    position_side = None
+    hold_vol = None
+
     positions = await BlofinAPI.get_open_positions(formatted_symbol)
+    if positions and len(positions) > 0:
+        position = positions[0]
+        entry_price = position.openAvgPrice
+        pos_side = position.positionType
+        hold_vol = abs(position.holdVol)
 
-    if not positions:
-        return f"⚠️ Cannot Move SL: No open position found for {formatted_symbol}"
+        if pos_side == "net":
+            position_side = "long" if position.holdVol > 0 else "short"
+        else:
+            position_side = pos_side
 
-    # Assuming we only have one position per symbol (standard for most bots)
-    position = positions[0]
-    entry_price = position.openAvgPrice
-    pos_side = position.positionType  # 'long', 'short', or 'net'
+    # Fallback: Try to get info from existing TPSL orders
+    if not entry_price:
+        tpsl_orders = await BlofinAPI.get_tpsl_orders(formatted_symbol)
+        if tpsl_orders:
+            tpsl = tpsl_orders[0]
+            hold_vol = float(tpsl.get('size', 0))
+            position_side = tpsl.get('posSide', 'long')
+
+            # Get entry from fills
+            fills = await BlofinAPI.get_fills(symbol=formatted_symbol)
+            if fills:
+                entry_price = float(fills[0].get('fillPrice', 0))
+
+    # Fallback: Try order history
+    if not entry_price:
+        history = await BlofinAPI.get_order_history(symbol=formatted_symbol)
+        if history:
+            for h in history:
+                if h.get('state') == 'filled':
+                    entry_price = float(h.get('averagePrice', 0))
+                    hold_vol = float(h.get('filledSize', 0))
+                    side = h.get('side', 'buy')
+                    position_side = "long" if side == "buy" else "short"
+                    break
+
+    if not entry_price or not hold_vol:
+        return f"⚠️ Cannot Move SL: No position info found for {formatted_symbol}"
 
     # 2. Determine SL Trigger Price
-    # For now, we set it exactly to entry. You could add a small buffer here if desired.
     final_sl_price = entry_price
-
-    print(f"   > Found Position: {pos_side.upper()} @ {entry_price}. Moving SL...")
-
-    # 3. Send Request to Blofin to Update TPSL
-    # Blofin Endpoint: /api/v1/trade/order-tpsl (creates conditional order)
-    # NOTE: Blofin manages TP/SL as separate conditional orders
-
-    # Determine exit side and position side for TPSL
-    # For net positions, we need to determine direction from holdVol or assume long if positive
-    if pos_side == "net":
-        # Net mode - need to determine actual direction
-        # Positive holdVol typically means long
-        position_side = "long" if position.holdVol > 0 else "short"
-    else:
-        position_side = pos_side
-
     exit_side = "sell" if position_side == "long" else "buy"
 
+    print(f"   > Found Position: {position_side.upper()} @ {entry_price}. Moving SL...")
+
+    # 3. Send Request to Blofin to Update TPSL
     req_body = {
         "instId": formatted_symbol,
         "marginMode": "isolated",
-        "posSide": position_side,  # Use explicit long/short
+        "posSide": position_side,
         "side": exit_side,
-        "size": str(position.holdVol),  # Use actual position size
-        "reduceOnly": "true",  # Links SL to position - closes with position
+        "size": str(hold_vol),
+        "reduceOnly": "true",
         "slTriggerPrice": str(final_sl_price),
-        "slOrderPrice": "-1"  # -1 indicates "Market Price" execution for the SL
+        "slOrderPrice": "-1"
     }
 
     logger.info(f" Breakeven TPSL request: {req_body}")
@@ -352,21 +438,32 @@ async def execute_signal_trade(data):
 
     logger.info(f" Current Market Price: {current_price} | Entry Price: {entry_price}")
 
-    # Determine if we should use limit or market order
-    # BUY limit: entry should be BELOW current price (buying on dip)
-    # SELL limit: entry should be ABOVE current price (selling on rally)
+    # Smart entry logic (matching MEXC behavior):
+    # - LONG: If current price <= entry -> market order (getting better or same price)
+    #         If current price > entry -> limit order (wait for pullback)
+    # - SHORT: If current price >= entry -> market order (getting better or same price)
+    #          If current price < entry -> limit order (wait for bounce)
     use_market_order = False
+    order_reason = "LIMIT ORDER"
 
-    if blofin_side == "buy":
-        if entry_price >= current_price:
-            # Entry is at or above market - would fill immediately, use market order
-            logger.info(f" Entry >= Market for BUY, using MARKET order at {current_price}")
+    if blofin_side == "buy":  # LONG
+        if current_price <= entry_price:
+            # Current price is at or below entry - buy now for better/same price
             use_market_order = True
-    else:  # sell
-        if entry_price <= current_price:
-            # Entry is at or below market - would fill immediately, use market order
-            logger.info(f" Entry <= Market for SELL, using MARKET order at {current_price}")
+            order_reason = f"MARKET (price {current_price} <= entry {entry_price})"
+        else:
+            # Current price is above entry - use limit to wait for pullback
+            order_reason = f"LIMIT @ {entry_price} (waiting for pullback from {current_price})"
+    else:  # sell / SHORT
+        if current_price >= entry_price:
+            # Current price is at or above entry - sell now for better/same price
             use_market_order = True
+            order_reason = f"MARKET (price {current_price} >= entry {entry_price})"
+        else:
+            # Current price is below entry - use limit to wait for bounce
+            order_reason = f"LIMIT @ {entry_price} (waiting for bounce from {current_price})"
+
+    logger.info(f" Order Decision: {order_reason}")
 
     # Validate TP/SL relative to entry/current price
     actual_entry = current_price if use_market_order else entry_price
@@ -524,16 +621,16 @@ async def execute_signal_trade(data):
         # Use limit order
         logger.info(f" Placing LIMIT {blofin_side.upper()} {formatted_symbol} @ {entry_price} x{leverage} | Vol: {final_vol}")
 
-    # 2. Place LIMIT Order at entry price (TP/SL will be set by monitor when order fills)
+    # 2. Place LIMIT Order at entry price with TP/SL attached
     res = await BlofinAPI.create_limit_order(
         symbol=formatted_symbol,
         side=blofin_side,
         vol=final_vol,
         price=entry_price,
         leverage=leverage,
-        position_side=pos_side
-        # Note: NOT passing TP/SL here - Blofin ignores them on limit orders
-        # The monitor will set TP/SL when the order fills
+        position_side=pos_side,
+        take_profit=tp1_price,
+        stop_loss=sl_price
     )
 
     logger.info(f"Order Response: {res}")
@@ -542,8 +639,19 @@ async def execute_signal_trade(data):
         order_data = res.get('data', [])
         order_id = order_data[0].get('orderId', 'N/A') if isinstance(order_data, list) and order_data else 'N/A'
 
-        # Store order for monitoring (with TP/SL info for when it fills)
+        # Check if TP/SL were attached by checking pending order
+        tpsl_attached = False
         if order_id != 'N/A':
+            await asyncio.sleep(0.5)  # Brief delay for order to be registered
+            pending = await BlofinAPI.get_pending_orders(formatted_symbol)
+            for p in pending:
+                if str(p.get('orderId')) == str(order_id):
+                    if p.get('tpTriggerPrice') or p.get('slTriggerPrice'):
+                        tpsl_attached = True
+                    break
+
+        # If TP/SL not attached, add to monitor queue as fallback
+        if not tpsl_attached and order_id != 'N/A':
             pending_orders[order_id] = {
                 'symbol': formatted_symbol,
                 'side': blofin_side,
@@ -553,7 +661,7 @@ async def execute_signal_trade(data):
                 'sl': sl_price,
                 'leverage': leverage
             }
-            logger.info(f"Added order {order_id} to monitoring queue")
+            logger.info(f"TP/SL not attached to order, added {order_id} to monitoring queue")
 
         order_msg = (
             f"📋 **LIMIT ORDER PLACED (Blofin)**\n"
@@ -566,9 +674,11 @@ async def execute_signal_trade(data):
         )
 
         if tp1_price:
-            order_msg += f"   TP1: {tp1_price} (set on fill)\n"
+            status = "✓" if tpsl_attached else "on fill"
+            order_msg += f"   TP1: {tp1_price} ({status})\n"
         if sl_price:
-            order_msg += f"   SL: {sl_price} (set on fill)\n"
+            status = "✓" if tpsl_attached else "on fill"
+            order_msg += f"   SL: {sl_price} ({status})\n"
 
         order_msg += "   ⏳ Waiting for price to reach entry..."
 
@@ -582,125 +692,380 @@ async def execute_signal_trade(data):
             error_msg = data[0].get('msg')
         return f"❌ **Limit Order Failed**\n   Error: {error_msg}"
 
-# --- SIGNAL PARSER ---
-def parse_signal(text: str):
+# --- PARSERS ---
+
+class SignalParser:
     """
-    Parses Telegram messages to extract trade details.
-    Compatible with standard formats: "PAIR: BTC/USDT SIDE: LONG..."
+    Robust signal parser for NEW TRADES.
+    Handles: "PAIR: BTC/USDT", "SIDE: LONG", "TP1: 0.55", ignoring "R:R" ratios.
     """
-    try:
-        # Remove common hidden/invisible Unicode characters first
-        # This includes: zero-width spaces, non-breaking spaces, soft hyphens, etc.
-        hidden_chars = [
-            '\u200b',  # Zero-width space
-            '\u200c',  # Zero-width non-joiner
-            '\u200d',  # Zero-width joiner
-            '\u200e',  # Left-to-right mark
-            '\u200f',  # Right-to-left mark
-            '\u00a0',  # Non-breaking space
-            '\u2060',  # Word joiner
-            '\ufeff',  # Byte order mark
-            '\u00ad',  # Soft hyphen
-            '\u2007',  # Figure space
-            '\u2008',  # Punctuation space
-            '\u2009',  # Thin space
-            '\u200a',  # Hair space
-            '\u202f',  # Narrow no-break space
-            '\u205f',  # Medium mathematical space
-            '\u3000',  # Ideographic space
-        ]
-        for char in hidden_chars:
+    NUM_PATTERN = r'([\d,]+\.?\d*)'
+
+    # Hidden characters to strip from Telegram messages
+    HIDDEN_CHARS = [
+        '\u200b', '\u200c', '\u200d', '\u200e', '\u200f',
+        '\u00a0', '\u2060', '\ufeff', '\u00ad', '\u2007',
+        '\u2008', '\u2009', '\u200a', '\u202f', '\u205f', '\u3000',
+    ]
+
+    @staticmethod
+    def _extract_number(text: str) -> float | None:
+        if not text:
+            return None
+        cleaned = text.replace(',', '')
+        try:
+            return float(cleaned)
+        except ValueError:
+            return None
+
+    @classmethod
+    def _clean_text(cls, text: str) -> str:
+        """Remove hidden unicode characters and normalize text."""
+        for char in cls.HIDDEN_CHARS:
             text = text.replace(char, ' ')
+        return text.upper()
 
-        # Convert to ASCII to remove emojis/weird chars
-        text = text.encode('ascii', 'ignore').decode('ascii')
-        text_clean = re.sub(r'[^a-zA-Z0-9\s.:,/%-]', '', text)
-        text_clean = re.sub(r'\s+', ' ', text_clean).strip()
+    @classmethod
+    def parse(cls, text: str, debug: bool = True) -> dict | None:
+        if debug:
+            print(f" DEBUG RAW: {repr(text)}")
 
-        logger.debug(f"Cleaned text: {text_clean}")
+        text_upper = cls._clean_text(text)
+        data = {}
 
         # Ignore Status Updates
-        if "TARGET HIT" in text_clean.upper() or "PROFIT:" in text_clean.upper():
-            return {'valid': False, 'error': 'Ignored: Status/Profit update'}
+        if "TARGET HIT" in text_upper or "PROFIT:" in text_upper:
+            if debug:
+                print(" Ignored: Status/Profit update")
+            return None
 
-        # 1. Parse Pair
-        pair_match = re.search(r"PAIR:\s*([A-Z0-9]+)[/_]([A-Z0-9]+)", text_clean, re.IGNORECASE)
+        # --- PAIR ---
+        pair_match = re.search(r'PAIR[\W_]*([A-Z0-9]+)[\W_]*[/_:-]?[\W_]*([A-Z0-9]+)', text_upper)
         if not pair_match:
-            return {'valid': False, 'error': 'Parsing Failed: No PAIR found'}
+            if debug:
+                print(" Parsing failed: No PAIR found.")
+            return None
+        data['symbol'] = f"{pair_match.group(1)}_{pair_match.group(2)}"
 
-        symbol = f"{pair_match.group(1)}_{pair_match.group(2)}".upper()
-
-        # 2. Check for Breakeven Command
-        if "MOVE SL TO ENTRY" in text_clean.upper():
+        # --- Check for Breakeven Command ---
+        if "MOVE SL TO ENTRY" in text_upper:
             return {
-                'valid': True,
                 'type': 'BREAKEVEN',
-                'symbol': symbol
+                'symbol': data['symbol']
             }
 
-        # 3. Parse Side (Long/Short)
-        side_match = re.search(r"SIDE:\s*(LONG|SHORT)", text_clean, re.IGNORECASE)
+        # --- SIDE ---
+        side_match = re.search(r'SIDE[\W_]*(LONG|SHORT)', text_upper)
         if not side_match:
-            return {'valid': False, 'error': f"Parsing Failed: Pair {symbol} found, but missing SIDE"}
-
-        direction = side_match.group(1).upper()
-        # We use standard naming for internal logic
+            if debug:
+                print(" Parsing failed: No SIDE found.")
+            return None
+        direction = side_match.group(1)
         from mexcpy.mexcTypes import OrderSide as MexcOrderSide
-        side = MexcOrderSide.OpenLong if direction == "LONG" else MexcOrderSide.OpenShort
+        data['side'] = MexcOrderSide.OpenLong if direction == "LONG" else MexcOrderSide.OpenShort
 
-        # 4. Parse Size/Equity %
-        size_match = re.search(r"SIZE:\s*(\d+)(?:\s*-\s*(\d+))?\s*%", text_clean, re.IGNORECASE)
-        equity_perc = 1.0
+        # --- SIZE ---
+        size_match = re.search(r'SIZE[\W_]*(\d+)[\W_]*(?:-[\W_]*(\d+))?[\W_]*%', text_upper)
         if size_match:
             val1 = float(size_match.group(1))
             val2 = float(size_match.group(2)) if size_match.group(2) else val1
-            equity_perc = (val1 + val2) / 2
-            logger.info(f"Parsed SIZE: {val1}-{val2}% -> Midpoint: {equity_perc}%")
+            data['equity_perc'] = (val1 + val2) / 2
         else:
-            # Debug: show what's around SIZE in the cleaned text
-            size_area = re.search(r"SIZE.{0,20}", text_clean, re.IGNORECASE)
-            if size_area:
-                logger.warning(f"SIZE not matched. Text around SIZE: '{size_area.group()}'")
+            data['equity_perc'] = 1.0
+
+        # --- ENTRY ---
+        entry_match = re.search(r'ENTRY[\W_]*' + cls.NUM_PATTERN + r'(?:[\W_]*-[\W_]*' + cls.NUM_PATTERN + r')?',
+                                text_upper)
+        if entry_match:
+            entry1 = cls._extract_number(entry_match.group(1))
+            entry2 = cls._extract_number(entry_match.group(2))
+            if entry1 and entry2:
+                data['entry'] = (entry1 + entry2) / 2
+            elif entry1:
+                data['entry'] = entry1
             else:
-                logger.warning(f"SIZE not found in text at all, using default 1%")
+                data['entry'] = "Market"
+        else:
+            data['entry'] = "Market"
 
-        # 5. Parse Entry Price (REQUIRED for limit orders)
-        entry_match = re.search(r"ENTRY:\s*([\d,.]+)", text_clean, re.IGNORECASE)
-        if not entry_match:
-            return {'valid': False, 'error': f"Parsing Failed: Pair {symbol} found, but missing ENTRY price"}
+        # --- STOP LOSS ---
+        sl_match = re.search(r'SL[\W_]*' + cls.NUM_PATTERN, text_upper)
+        data['sl'] = cls._extract_number(sl_match.group(1)) if sl_match else None
 
-        entry_price = float(entry_match.group(1).replace(',', ''))
+        # --- LEVERAGE ---
+        lev_match = re.search(r'LEV(?:ERAGE)?[\W_]*(\d+)', text_upper)
+        data['leverage'] = int(lev_match.group(1)) if lev_match else 20
 
-        # 6. Parse SL
-        sl_match = re.search(r"SL:\s*([\d,.]+)", text_clean, re.IGNORECASE)
-        sl_price = float(sl_match.group(1).replace(',', '')) if sl_match else None
+        # --- TAKE PROFIT TARGETS ---
+        tp_matches = re.findall(r'TP\d[\W_]*' + cls.NUM_PATTERN + r'(?!\s*R:R)', text_upper)
 
-        # 7. Parse Leverage
-        lev_match = re.search(r"LEVERAGE:\s*(\d+)", text_clean, re.IGNORECASE)
-        leverage = int(lev_match.group(1)) if lev_match else 20
-
-        # 8. Parse TPs
-        all_tps = re.findall(r"TP\d:\s*([\d,.]+)", text_clean, re.IGNORECASE)
         real_tps = []
-        if all_tps:
-            limit = 3 if len(all_tps) >= 3 else len(all_tps)
-            real_tps = [float(tp.replace(',', '')) for tp in all_tps[:limit]]
+        for tp_str in tp_matches:
+            tp_val = cls._extract_number(tp_str)
+            if tp_val:
+                real_tps.append(tp_val)
 
-        return {
-            'valid': True,
-            'type': 'TRADE',
-            'symbol': symbol,
-            'side': side,
-            'equity_perc': equity_perc,
-            'leverage': leverage,
-            'entry': entry_price,
-            'sl': sl_price,
-            'tps': real_tps
+        data['tps'] = real_tps[:3]
+        data['type'] = 'TRADE'
+
+        if debug:
+            print(f" PARSED SIGNAL: {data}")
+        return data
+
+
+class UpdateParser:
+    """
+    Parses 'Update' messages like:
+    "ASTER/USDT #1175 change TP1 to 0.75222"
+    "BTC/USDT change SL to 94000"
+    """
+
+    @staticmethod
+    def parse(text: str, debug: bool = True) -> dict | None:
+        text_upper = text.upper()
+
+        if not any(k in text_upper for k in ["CHANGE", "ADJUST", "MOVE", "SET", "UPDATE"]):
+            return None
+
+        data = {}
+
+        pair_match = re.search(r'([A-Z0-9]+)[\W_]*[/_:-][\W_]*([A-Z0-9]+)', text_upper)
+        if not pair_match:
+            if debug:
+                print(" Update detected but NO PAIR found. Ignoring.")
+            return None
+
+        data['symbol'] = f"{pair_match.group(1)}_{pair_match.group(2)}"
+
+        sl_match = re.search(r'(?:SL|STOP(?:\s*LOSS)?)\W+(?:IS\W+)?(?:NOW|TO|BE)\W+([\d,.]+)', text_upper)
+        if sl_match:
+            data['type'] = 'SL'
+            data['price'] = float(sl_match.group(1).replace(',', ''))
+            if debug:
+                print(f" PARSED UPDATE: {data}")
+            return data
+
+        tp_match = re.search(r'(TP\d?)\W+(?:IS\W+)?(?:NOW|TO|BE)\W+([\d,.]+)', text_upper)
+        if tp_match:
+            data['type'] = tp_match.group(1)
+            data['price'] = float(tp_match.group(2).replace(',', ''))
+            if debug:
+                print(f" PARSED UPDATE: {data}")
+            return data
+
+        return None
+
+
+def parse_signal(text: str) -> dict | None:
+    """Wrapper for backward compatibility"""
+    try:
+        return SignalParser.parse(text, debug=True)
+    except Exception as e:
+        logger.error(f"Parse Error: {e}")
+        return None
+
+
+# --- UPDATE EXECUTION ---
+
+async def execute_update_signal(data):
+    """
+    Executes an UPDATE by MODIFYING the existing Position TP/SL order.
+    For Blofin: finds the existing TPSL order and either amends or recreates it.
+    """
+    symbol_raw = data['symbol']
+    formatted_symbol = symbol_raw.replace('_', '-')
+    update_type = data['type']
+    new_price_raw = data['price']
+
+    print(f"  PROCESSING UPDATE: {formatted_symbol} {update_type} -> {new_price_raw}")
+
+    # Get instrument info for price precision
+    inst_info = await BlofinAPI.get_instrument_info(formatted_symbol)
+    tick_size = float(inst_info.get('tickSize', 0.00001)) if inst_info else 0.00001
+    final_price = adjust_price_to_step(new_price_raw, tick_size)
+
+    # 1. Get existing TPSL orders first (these work on demo)
+    tpsl_orders = await BlofinAPI.get_tpsl_orders(formatted_symbol)
+
+    print(f" DEBUG: Found {len(tpsl_orders)} active TPSL orders for {formatted_symbol}")
+
+    # Try to get position info (may fail on demo)
+    position = None
+    position_side = None
+    hold_vol = None
+    margin_mode = "isolated"
+
+    positions = await BlofinAPI.get_open_positions(formatted_symbol)
+    if positions and len(positions) > 0:
+        position = positions[0]
+        pos_side = position.positionType
+        hold_vol = abs(position.holdVol)
+        margin_mode = position.marginMode or "isolated"
+
+        if pos_side == "net":
+            position_side = "long" if position.holdVol > 0 else "short"
+        else:
+            position_side = pos_side
+
+    # Fallback: get position info from existing TPSL orders
+    if not position_side and tpsl_orders:
+        first_tpsl = tpsl_orders[0]
+        hold_vol = float(first_tpsl.get('size', 0))
+        position_side = first_tpsl.get('posSide', 'long')
+        margin_mode = first_tpsl.get('marginMode', 'isolated')
+
+    # Fallback: get from order history
+    if not position_side:
+        history = await BlofinAPI.get_order_history(symbol=formatted_symbol)
+        if history:
+            for h in history:
+                if h.get('state') == 'filled':
+                    hold_vol = float(h.get('filledSize', 0))
+                    side = h.get('side', 'buy')
+                    position_side = "long" if side == "buy" else "short"
+                    break
+
+    if not tpsl_orders and not position_side:
+        return f"  Update Ignored: No position or TPSL orders found for {formatted_symbol}"
+
+    target_order = None
+    for order in tpsl_orders:
+        tpsl_id = order.get('tpslId')
+        order_type = order.get('tpslType', '')  # 'tp', 'sl', or 'tpsl'
+        tp_trigger = order.get('tpTriggerPrice')
+        sl_trigger = order.get('slTriggerPrice')
+
+        print(f"    - ID={tpsl_id} | Type={order_type} | TP={tp_trigger} | SL={sl_trigger}")
+
+        # Match based on update type
+        if update_type == 'SL' and (order_type in ['sl', 'tpsl'] or sl_trigger):
+            target_order = {
+                'tpsl_id': tpsl_id,
+                'order_type': order_type,
+                'curr_tp': tp_trigger,
+                'curr_sl': sl_trigger,
+                'size': order.get('size'),
+                'posSide': order.get('posSide', position_side),
+                'marginMode': order.get('marginMode', margin_mode)
+            }
+            break
+        elif 'TP' in update_type and (order_type in ['tp', 'tpsl'] or tp_trigger):
+            target_order = {
+                'tpsl_id': tpsl_id,
+                'order_type': order_type,
+                'curr_tp': tp_trigger,
+                'curr_sl': sl_trigger,
+                'size': order.get('size'),
+                'posSide': order.get('posSide', position_side),
+                'marginMode': order.get('marginMode', margin_mode)
+            }
+            break
+
+    if not target_order:
+        # No existing TPSL order found - create a new one
+        if not position_side or not hold_vol:
+            return f"  Update Failed: Cannot determine position info for {formatted_symbol}"
+
+        print(f" No existing {update_type} order found. Creating new TPSL order...")
+
+        close_side = "sell" if position_side == "long" else "buy"
+
+        tpsl_body = {
+            "instId": formatted_symbol,
+            "marginMode": margin_mode,
+            "posSide": position_side,
+            "side": close_side,
+            "size": str(hold_vol),
+            "reduceOnly": "true"
         }
 
-    except Exception as e:
-        logger.error(f"Parse Exception: {e}")
-        return {'valid': False, 'error': f"Exception: {str(e)}"}
+        if update_type == 'SL':
+            tpsl_body["slTriggerPrice"] = str(final_price)
+            tpsl_body["slOrderPrice"] = "-1"
+        else:  # TP
+            tpsl_body["tpTriggerPrice"] = str(final_price)
+            tpsl_body["tpOrderPrice"] = "-1"
+
+        logger.info(f" Creating new TPSL: {tpsl_body}")
+        res = await BlofinAPI._make_request("POST", "/api/v1/trade/order-tpsl", body=tpsl_body)
+        logger.info(f" TPSL Response: {res}")
+
+        if res and res.get('code') == "0":
+            return f" SUCCESS: {formatted_symbol} {update_type} set to {final_price}"
+        else:
+            error_msg = res.get('msg', 'Unknown Error') if res else 'No Response'
+            return f"  FAILED to create {update_type}: {error_msg}"
+
+    # 3. Try to amend the existing TPSL order
+    print(f" Amending TPSL Order {target_order['tpsl_id']}...")
+
+    if update_type == 'SL':
+        res = await BlofinAPI.amend_tpsl_order(
+            symbol=formatted_symbol,
+            tpsl_id=target_order['tpsl_id'],
+            new_sl_trigger_price=final_price
+        )
+    else:  # TP
+        res = await BlofinAPI.amend_tpsl_order(
+            symbol=formatted_symbol,
+            tpsl_id=target_order['tpsl_id'],
+            new_tp_trigger_price=final_price
+        )
+
+    logger.info(f" Amend TPSL Response: {res}")
+
+    if res and res.get('code') == "0":
+        return f" SUCCESS: {formatted_symbol} {update_type} updated to {final_price}"
+    else:
+        # Amend failed - try cancel and recreate
+        error_msg = res.get('msg', 'Unknown') if res else 'No Response'
+        print(f"    Amend failed ({error_msg}), trying cancel & recreate...")
+
+        # Cancel existing order
+        cancel_res = await BlofinAPI.cancel_tpsl_order(formatted_symbol, target_order['tpsl_id'])
+        logger.info(f" Cancel TPSL Response: {cancel_res}")
+
+        if not (cancel_res and cancel_res.get('code') == "0"):
+            return f"  FAILED to cancel existing {update_type}: {cancel_res.get('msg', 'Unknown') if cancel_res else 'No Response'}"
+
+        # Use position info from target_order (already extracted earlier)
+        pos_side = target_order.get('posSide', position_side or 'long')
+        close_side = "sell" if pos_side == "long" else "buy"
+        size = target_order.get('size') or str(hold_vol or 0)
+
+        tpsl_body = {
+            "instId": formatted_symbol,
+            "marginMode": target_order.get('marginMode', margin_mode),
+            "posSide": pos_side,
+            "side": close_side,
+            "size": size,
+            "reduceOnly": "true"
+        }
+
+        if update_type == 'SL':
+            tpsl_body["slTriggerPrice"] = str(final_price)
+            tpsl_body["slOrderPrice"] = "-1"
+            # Preserve existing TP if it was a combined order
+            if target_order.get('curr_tp'):
+                tpsl_body["tpTriggerPrice"] = str(target_order['curr_tp'])
+                tpsl_body["tpOrderPrice"] = "-1"
+        else:  # TP
+            tpsl_body["tpTriggerPrice"] = str(final_price)
+            tpsl_body["tpOrderPrice"] = "-1"
+            # Preserve existing SL if it was a combined order
+            if target_order.get('curr_sl'):
+                tpsl_body["slTriggerPrice"] = str(target_order['curr_sl'])
+                tpsl_body["slOrderPrice"] = "-1"
+
+        logger.info(f" Creating replacement TPSL: {tpsl_body}")
+        new_res = await BlofinAPI._make_request("POST", "/api/v1/trade/order-tpsl", body=tpsl_body)
+        logger.info(f" New TPSL Response: {new_res}")
+
+        if new_res and new_res.get('code') == "0":
+            return f" SUCCESS: {formatted_symbol} {update_type} updated to {final_price} (via recreate)"
+        else:
+            new_error = new_res.get('msg', 'Unknown') if new_res else 'No Response'
+            return f"  FAILED to recreate {update_type}: {new_error}"
 
 
 # --- TELEGRAM HANDLER ---
@@ -711,37 +1076,46 @@ async def handler(event):
         return
 
     text = event.text
+    if not text:
+        return
 
-    # Basic filter to ensure we only look at signals
-    if "PAIR:" in text.upper():
-        print(f"\n--- Signal Detected ({datetime.now().strftime('%H:%M:%S')}) ---")
+    text_upper = text.upper()
 
-        result = parse_signal(text)
+    # Route 1: New Trade Signals (PAIR + SIDE)
+    if "PAIR" in text_upper and "SIDE" in text_upper:
+        print(f"\n--- New Signal Detected ({datetime.now().strftime('%H:%M:%S')}) ---")
 
-        if not result['valid']:
-            # Log errors nicely
-            if "Ignored" in result['error']:
-                print(f" -> {result['error']}")
-            else:
-                print(f"  ⚠️ {result['error']}")
+        signal_data = parse_signal(text)
+        if not signal_data:
+            print(" Failed to parse signal.")
             return
 
-        symbol = result['symbol']
+        symbol = signal_data['symbol']
 
         # ROUTING
-        if result['type'] == 'BREAKEVEN':
-            print(f"  🔄 Processing BREAKEVEN for {symbol}...")
+        if signal_data['type'] == 'BREAKEVEN':
+            print(f"  Processing BREAKEVEN for {symbol}...")
             res = await move_sl_to_entry(symbol)
             print(res)
-            # Send feedback to "Saved Messages" (me)
-            # await client.send_message('me', res)
 
-        elif result['type'] == 'TRADE':
-            print(f"  ⚡ Processing TRADE for {symbol}...")
-            res = await execute_signal_trade(result)
+        elif signal_data['type'] == 'TRADE':
+            print(f"  Processing TRADE for {symbol}...")
+            res = await execute_signal_trade(signal_data)
             print(res)
-            # Send feedback to "Saved Messages" (me)
-            # await client.send_message('me', res)
+
+        return
+
+    # Route 2: Update Signals (change TP/SL)
+    if any(k in text_upper for k in ["CHANGE", "ADJUST", "MOVE", "SET"]) and "/" in text:
+        print(f"\n--- Update Signal Detected ({datetime.now().strftime('%H:%M:%S')}) ---")
+
+        update_data = UpdateParser.parse(text)
+
+        if update_data:
+            result = await execute_update_signal(update_data)
+            print(result)
+        else:
+            print(" Update detected but failed to parse details.")
 
 
 # --- MAIN EXECUTION ---
