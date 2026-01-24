@@ -50,6 +50,9 @@ client = TelegramClient(str(SESSION_BREAKEVEN), API_ID, API_HASH)
 # Track pending orders for monitoring
 pending_orders = {}  # {order_id: {symbol, side, size, tp, sl, entry_price}}
 
+# Track active positions for monitoring closures
+active_positions = {}  # {symbol: {side, size, entry_price, tp, sl, leverage}}
+
 
 # --- HELPER FUNCTIONS ---
 def adjust_price_to_step(price, step_size):
@@ -67,22 +70,19 @@ def adjust_price_to_step(price, step_size):
 
 # --- TRADE LOGIC ---
 
-async def monitor_order_fills():
+async def monitor_orders_and_positions():
     """
-    Background task that monitors pending limit orders.
-    When an order fills, it sends a notification and sets up TP/SL.
-
-    Note: Blofin Demo API doesn't support get_open_positions, so we detect fills
-    by monitoring when orders disappear from pending orders list or show filledSize > 0.
+    Background task that monitors:
+    1. Pending limit orders - for fills or cancellations
+    2. Active positions - for closures (TP hit, SL hit, manual close)
     """
-    global pending_orders
+    global pending_orders, active_positions
 
     while True:
         try:
+            # === PART 1: Monitor Pending Orders ===
             if pending_orders:
                 orders_to_remove = []
-
-                # Get ALL pending orders once per cycle
                 all_pending = await BlofinAPI.get_pending_orders()
 
                 for order_id, order_info in list(pending_orders.items()):
@@ -96,23 +96,17 @@ async def monitor_order_fills():
                             break
 
                     if our_order:
-                        # Order still exists - check if partially or fully filled
-                        filled_size = float(our_order.get('filledSize', 0))
+                        # Order still pending
                         state = our_order.get('state', '')
-                        avg_price = our_order.get('averagePrice', order_info.get('entry_price', 0))
-
-                        if filled_size > 0 and state == 'filled':
-                            # Order filled! Set TP/SL
-                            logger.info(f"Order {order_id} FILLED: size={filled_size}, price={avg_price}")
-                            await _set_tpsl_for_filled_order(order_info, filled_size, avg_price)
+                        if state == 'live':
+                            logger.debug(f"Order {order_id} still pending for {symbol}")
+                        elif state == 'filled':
+                            filled_size = float(our_order.get('filledSize', 0))
+                            avg_price = float(our_order.get('averagePrice', 0)) or order_info.get('entry_price')
+                            await _handle_order_filled(order_id, order_info, filled_size, avg_price)
                             orders_to_remove.append(order_id)
-
-                        else:
-                            # Order still pending/live
-                            logger.debug(f"Order {order_id} still pending for {symbol} (state={state})")
-
                     else:
-                        # Order not in pending list - check order history
+                        # Order not in pending - check history
                         history = await BlofinAPI.get_order_history(symbol=symbol, order_id=order_id)
 
                         if history:
@@ -122,41 +116,95 @@ async def monitor_order_fills():
                             avg_price = float(hist_order.get('averagePrice', 0)) or order_info.get('entry_price')
 
                             if state == 'filled' and filled_size > 0:
-                                logger.info(f"Order {order_id} confirmed FILLED via history: size={filled_size}, price={avg_price}")
-                                await _set_tpsl_for_filled_order(order_info, filled_size, avg_price)
+                                await _handle_order_filled(order_id, order_info, filled_size, avg_price)
                                 orders_to_remove.append(order_id)
                             elif state in ['cancelled', 'canceled']:
-                                logger.info(f"Order {order_id} was CANCELLED")
-                                print(f"\n Order {order_id} for {symbol} was cancelled.")
+                                await _handle_order_cancelled(order_id, order_info)
                                 orders_to_remove.append(order_id)
                             else:
-                                # Unknown state - wait a bit more
                                 check_count = order_info.get('_check_count', 0) + 1
                                 order_info['_check_count'] = check_count
                                 if check_count >= 3:
-                                    logger.warning(f"Order {order_id} in unknown state: {state}")
                                     orders_to_remove.append(order_id)
                         else:
-                            # No history yet - might be processing
                             check_count = order_info.get('_check_count', 0) + 1
                             order_info['_check_count'] = check_count
-
                             if check_count >= 3:
-                                # Order disappeared with no history - assume filled
-                                logger.info(f"Order {order_id} disappeared (no history) - assuming filled")
-                                await _set_tpsl_for_filled_order(
-                                    order_info,
+                                # Assume filled if disappeared
+                                await _handle_order_filled(
+                                    order_id, order_info,
                                     order_info.get('size'),
                                     order_info.get('entry_price')
                                 )
                                 orders_to_remove.append(order_id)
 
-                # Remove processed orders
                 for oid in orders_to_remove:
                     if oid in pending_orders:
                         del pending_orders[oid]
 
-            await asyncio.sleep(5)  # Check every 5 seconds
+            # === PART 2: Monitor Active Positions ===
+            if active_positions:
+                positions_to_remove = []
+
+                for symbol, pos_info in list(active_positions.items()):
+                    print(f" [DEBUG] Checking position for {symbol}...")
+
+                    # Method 1: Try get_open_positions API
+                    positions = await BlofinAPI.get_open_positions(symbol)
+                    print(f" [DEBUG] get_open_positions returned: {len(positions) if positions else 0} positions")
+
+                    if positions and len(positions) > 0:
+                        print(f" [DEBUG] Position still open for {symbol}")
+                        continue  # Position still exists
+
+                    # Method 2: Check if TPSL orders exist (fallback for demo)
+                    # If TPSL orders exist, position is likely still open
+                    tpsl_orders = await BlofinAPI.get_tpsl_orders(symbol)
+                    print(f" [DEBUG] TPSL orders for {symbol}: {len(tpsl_orders)}")
+
+                    if tpsl_orders and len(tpsl_orders) > 0:
+                        print(f" [DEBUG] TPSL orders exist - position likely still open for {symbol}")
+                        continue  # TPSL exists, so position likely exists
+
+                    # Method 3: Check TPSL history to see if it was triggered recently
+                    tpsl_history = await BlofinAPI._make_request(
+                        "GET",
+                        "/api/v1/trade/orders-tpsl-history",
+                        params={"instType": "SWAP", "instId": symbol}
+                    )
+                    print(f" [DEBUG] TPSL history response: {tpsl_history}")
+
+                    # Only consider closed if we have positive confirmation
+                    if tpsl_history and tpsl_history.get('code') == "0":
+                        history_data = tpsl_history.get('data', [])
+                        if history_data:
+                            recent = history_data[0]
+                            state = recent.get('state', '')
+                            print(f" [DEBUG] Recent TPSL state: {state}")
+
+                            if state in ['filled', 'triggered', 'canceled', 'cancelled']:
+                                # Position was closed by TP/SL or cancelled
+                                await _handle_position_closed(symbol, pos_info)
+                                positions_to_remove.append(symbol)
+                            else:
+                                print(f" [DEBUG] TPSL state '{state}' - not closing yet")
+                        else:
+                            # No TPSL history - use counter-based approach
+                            check_count = pos_info.get('_close_check_count', 0) + 1
+                            pos_info['_close_check_count'] = check_count
+                            print(f" [DEBUG] No TPSL history, check count: {check_count}")
+
+                            if check_count >= 6:  # 30 seconds of no position/tpsl
+                                await _handle_position_closed(symbol, pos_info)
+                                positions_to_remove.append(symbol)
+                    else:
+                        print(f" [DEBUG] TPSL history API error or empty - skipping close check")
+
+                for sym in positions_to_remove:
+                    if sym in active_positions:
+                        del active_positions[sym]
+
+            await asyncio.sleep(5)
 
         except Exception as e:
             logger.error(f"Monitor error: {e}")
@@ -165,26 +213,29 @@ async def monitor_order_fills():
             await asyncio.sleep(10)
 
 
-async def _set_tpsl_for_filled_order(order_info: dict, filled_size: float, fill_price: float):
-    """Helper to set TP/SL after a limit order fills."""
+async def _handle_order_filled(order_id: str, order_info: dict, filled_size: float, fill_price: float):
+    """Handle when a limit order is filled."""
     symbol = order_info['symbol']
-    tp_price = order_info.get('tp')
-    sl_price = order_info.get('sl')
+    side = order_info['side']
 
     fill_msg = (
+        f"\n{'='*40}\n"
         f"🚀 **LIMIT ORDER FILLED!**\n"
         f"   Symbol: {symbol}\n"
-        f"   Side: {order_info['side'].upper()}\n"
+        f"   Side: {side.upper()}\n"
         f"   Entry: {fill_price}\n"
         f"   Size: {filled_size}\n"
         f"   Lev: x{order_info.get('leverage', 'N/A')}\n"
     )
 
-    if tp_price or sl_price:
-        tpsl_side = "sell" if order_info['side'] == "buy" else "buy"
-        position_side = "long" if order_info['side'] == "buy" else "short"
+    tp_price = order_info.get('tp')
+    sl_price = order_info.get('sl')
 
-        # Set TP and SL separately for reliability
+    # Set TP/SL if needed (for orders where it wasn't attached)
+    if tp_price or sl_price:
+        tpsl_side = "sell" if side == "buy" else "buy"
+        position_side = "long" if side == "buy" else "short"
+
         tpsl_success = []
         tpsl_errors = []
 
@@ -199,16 +250,11 @@ async def _set_tpsl_for_filled_order(order_info: dict, filled_size: float, fill_
                 "tpTriggerPrice": str(tp_price),
                 "tpOrderPrice": "-1"
             }
-            logger.info(f" Setting TP for filled order: {tp_body}")
             tp_res = await BlofinAPI._make_request("POST", "/api/v1/trade/order-tpsl", body=tp_body)
-            logger.info(f" TP Response: {tp_res}")
-
             if tp_res and tp_res.get('code') == "0":
                 tpsl_success.append(f"TP: {tp_price}")
-                fill_msg += f"   TP: {tp_price}\n"
             else:
-                error = tp_res.get('msg', 'Unknown') if tp_res else 'No response'
-                tpsl_errors.append(f"TP: {error}")
+                tpsl_errors.append(f"TP: {tp_res.get('msg', 'Failed') if tp_res else 'No response'}")
 
         if sl_price:
             sl_body = {
@@ -221,25 +267,109 @@ async def _set_tpsl_for_filled_order(order_info: dict, filled_size: float, fill_
                 "slTriggerPrice": str(sl_price),
                 "slOrderPrice": "-1"
             }
-            logger.info(f" Setting SL for filled order: {sl_body}")
             sl_res = await BlofinAPI._make_request("POST", "/api/v1/trade/order-tpsl", body=sl_body)
-            logger.info(f" SL Response: {sl_res}")
-
             if sl_res and sl_res.get('code') == "0":
                 tpsl_success.append(f"SL: {sl_price}")
-                fill_msg += f"   SL: {sl_price}\n"
             else:
-                error = sl_res.get('msg', 'Unknown') if sl_res else 'No response'
-                tpsl_errors.append(f"SL: {error}")
+                tpsl_errors.append(f"SL: {sl_res.get('msg', 'Failed') if sl_res else 'No response'}")
 
         if tpsl_success:
             fill_msg += f"   ✓ Set: {', '.join(tpsl_success)}\n"
         if tpsl_errors:
             fill_msg += f"   ⚠️ Failed: {'; '.join(tpsl_errors)}\n"
-    else:
-        fill_msg += "   (No TP/SL configured)\n"
 
-    print(f"\n{fill_msg}")
+    fill_msg += f"{'='*40}"
+    print(fill_msg)
+
+    # Add to active positions for monitoring
+    active_positions[symbol] = {
+        'side': side,
+        'size': filled_size,
+        'entry_price': fill_price,
+        'tp': tp_price,
+        'sl': sl_price,
+        'leverage': order_info.get('leverage')
+    }
+    logger.info(f"Added {symbol} to active positions monitoring")
+
+
+async def _handle_order_cancelled(order_id: str, order_info: dict):
+    """Handle when an order is cancelled."""
+    symbol = order_info['symbol']
+    side = order_info['side']
+    entry = order_info.get('entry_price', 'N/A')
+
+    cancel_msg = (
+        f"\n{'='*40}\n"
+        f"❌ **ORDER CANCELLED**\n"
+        f"   Symbol: {symbol}\n"
+        f"   Side: {side.upper()}\n"
+        f"   Entry: {entry}\n"
+        f"   Order ID: {order_id}\n"
+        f"{'='*40}"
+    )
+    print(cancel_msg)
+
+
+async def _handle_position_closed(symbol: str, pos_info: dict):
+    """Handle when a position is closed. Determine the reason."""
+    side = pos_info['side']
+    entry_price = pos_info.get('entry_price', 'N/A')
+    tp_price = pos_info.get('tp')
+    sl_price = pos_info.get('sl')
+
+    # Try to determine close reason from TPSL order history
+    reason = "Manual Close / Unknown"
+
+    try:
+        # Check TPSL order history
+        tpsl_history = await BlofinAPI._make_request(
+            "GET",
+            "/api/v1/trade/orders-tpsl-history",
+            params={"instType": "SWAP", "instId": symbol}
+        )
+
+        if tpsl_history and tpsl_history.get('code') == "0":
+            orders = tpsl_history.get('data', [])
+            if orders:
+                # Get most recent TPSL order
+                recent = orders[0]
+                state = recent.get('state', '')
+                triggered_tp = recent.get('tpTriggerPrice')
+                triggered_sl = recent.get('slTriggerPrice')
+
+                if state in ['filled', 'triggered']:
+                    if triggered_tp and float(triggered_tp) > 0:
+                        reason = f"**TAKE PROFIT HIT** @ {triggered_tp}"
+                    elif triggered_sl and float(triggered_sl) > 0:
+                        reason = f"**STOP LOSS HIT** @ {triggered_sl}"
+
+        # Fallback: check fills
+        if reason == "Manual Close / Unknown":
+            fills = await BlofinAPI.get_fills(symbol=symbol)
+            if fills:
+                recent_fill = fills[0]
+                fill_price = float(recent_fill.get('fillPrice', 0))
+
+                # Compare to TP/SL prices
+                if tp_price and abs(fill_price - tp_price) / tp_price < 0.005:  # Within 0.5%
+                    reason = f"**TAKE PROFIT HIT** @ {fill_price}"
+                elif sl_price and abs(fill_price - sl_price) / sl_price < 0.005:
+                    reason = f"**STOP LOSS HIT** @ {fill_price}"
+
+    except Exception as e:
+        logger.error(f"Error determining close reason: {e}")
+
+    close_msg = (
+        f"\n{'='*40}\n"
+        f"📊 **POSITION CLOSED!**\n"
+        f"   Symbol: {symbol}\n"
+        f"   Side: {side.upper()}\n"
+        f"   Entry: {entry_price}\n"
+        f"   Reason: {reason}\n"
+        f"{'='*40}"
+    )
+    print(close_msg)
 
 
 async def move_sl_to_entry(symbol: str):
@@ -608,6 +738,17 @@ async def execute_signal_trade(data):
                         order_msg += f"   ⚠️ Failed: {'; '.join(tpsl_errors)}"
                 else:
                     order_msg += "   ⚠️ TP/SL skipped (invalid vs current price)"
+
+            # Add to active positions for monitoring
+            active_positions[formatted_symbol] = {
+                'side': blofin_side,
+                'size': final_vol,
+                'entry_price': current_price,
+                'tp': tp1_price,
+                'sl': sl_price,
+                'leverage': leverage
+            }
+            logger.info(f"Added {formatted_symbol} to active positions monitoring")
 
             return order_msg
         else:
@@ -1135,7 +1276,7 @@ if __name__ == "__main__":
 
         # Get the event loop and create the monitor task
         loop = asyncio.get_event_loop()
-        loop.create_task(monitor_order_fills())
+        loop.create_task(monitor_orders_and_positions())
         logger.info("Order fill monitor started")
 
         # Run until disconnected

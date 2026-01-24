@@ -25,7 +25,9 @@ class BlofinFuturesAPI:
         request_path = endpoint
 
         if method == "GET" and params:
-            query_string = "&".join([f"{k}={v}" for k, v in params.items()])
+            # CRITICAL: Sort params alphabetically for correct signature generation
+            sorted_params = sorted(params.items(), key=lambda x: x[0])
+            query_string = "&".join([f"{k}={v}" for k, v in sorted_params])
             request_path = f"{endpoint}?{query_string}"
             url = f"{self.base_url}{request_path}"
 
@@ -93,37 +95,54 @@ class BlofinFuturesAPI:
 
     # --- Positions ---
     async def get_open_positions(self, symbol: Optional[str] = None) -> List[PositionInfo]:
-        # Don't pass symbol to API - demo might not support it
-        # We'll filter locally instead
+        """
+        Get open positions. Pass symbol (instId) for faster, more accurate results.
+        Returns empty list on API error (check logs for details).
+        Note: Demo API may not support this endpoint (error 152404).
+        """
         params = {"instType": "SWAP"}
+
+        # Pass instId to API when available - reduces latency and ensures correct data
+        if symbol:
+            params["instId"] = symbol
 
         resp = await self._make_request("GET", "/api/v1/trade/positions", params=params)
 
         import logging
         logger = logging.getLogger("BlofinAPI")
-        logger.info(f"Positions response: {resp}")
+
+        # Check for API errors
+        code = resp.get("code", "error")
+        if code != "0":
+            logger.warning(f"get_open_positions API error: code={code}, msg={resp.get('msg', 'Unknown')}")
+            return []  # Return empty on error - caller should use fallback methods
+
+        logger.debug(f"Positions response: {resp}")
 
         positions = []
-        if resp.get("code") == "0" and "data" in resp:
-            data_obj = resp["data"]
-            source_list = data_obj if isinstance(data_obj, list) else []
+        data_obj = resp.get("data", [])
+        source_list = data_obj if isinstance(data_obj, list) else []
 
-            for item in source_list:
-                pos = PositionInfo(
-                    positionId=item.get("posId", ""),
-                    symbol=item.get("instId", ""),
-                    holdVol=float(item.get("positions", 0)),
-                    positionType=item.get("positionSide", ""),
-                    openAvgPrice=float(item.get("avgPx", 0)),
-                    liquidatePrice=float(item.get("liqPx", 0) or 0),
-                    unrealized=float(item.get("unrealizedPl", 0)),
-                    leverage=int(item.get("leverage", 1)),
-                    marginMode=item.get("marginMode", "cross")
-                )
-                # Filter by symbol locally if specified
-                if symbol is None or pos.symbol == symbol:
-                    positions.append(pos)
+        for item in source_list:
+            # Skip positions with 0 size
+            hold_vol = float(item.get("positions", 0))
+            if hold_vol == 0:
+                continue
 
+            pos = PositionInfo(
+                positionId=item.get("posId", ""),
+                symbol=item.get("instId", ""),
+                holdVol=hold_vol,
+                positionType=item.get("positionSide", ""),
+                openAvgPrice=float(item.get("avgPx", 0)),
+                liquidatePrice=float(item.get("liqPx", 0) or 0),
+                unrealized=float(item.get("unrealizedPl", 0)),
+                leverage=int(item.get("leverage", 1)),
+                marginMode=item.get("marginMode", "cross")
+            )
+            positions.append(pos)
+
+        logger.info(f"Found {len(positions)} open positions for {symbol or 'all symbols'}")
         return positions
 
     # --- Leverage ---
