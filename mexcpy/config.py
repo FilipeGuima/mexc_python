@@ -30,6 +30,8 @@ SESSION_DIR.mkdir(parents=True, exist_ok=True)
 
 SESSION_TP1 = SESSION_DIR / "tp1_session"
 SESSION_BREAKEVEN = SESSION_DIR / "breakeven_session"
+SESSION_TP3 = SESSION_DIR / "tp3_session"
+SESSION_SCALED = SESSION_DIR / "scaled_session"
 SESSION_USER = SESSION_DIR / "user_listener_session"
 
 SESSION_MAIN = SESSION_DIR / "anon_session"

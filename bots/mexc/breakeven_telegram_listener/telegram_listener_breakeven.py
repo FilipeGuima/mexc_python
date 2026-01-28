@@ -434,6 +434,9 @@ async def handler(event):
             # await client.send_message('me', res)
 
         elif result['type'] == 'TRADE':
+            if not result.get('sl') or not result.get('tps'):
+                print(f" Signal skipped for {symbol}: Missing SL or TP. Waiting for full signal.")
+                return
             print(f"  Processing TRADE for {symbol}...")
             res = await execute_signal_trade(result)
             print(res)
@@ -447,11 +450,24 @@ if __name__ == "__main__":
     print(f" Watching Chats: {TARGET_CHATS}")
     print("---------------------------------------")
 
-    client.start()
+    async def startup():
+        await client.start()
 
-    client.loop.create_task(resume_monitoring())
+        print(" Checking MEXC API connection...")
+        res = await MexcAPI.get_user_assets()
+        if res.success:
+            usdt = next((a for a in res.data if a.currency == "USDT"), None)
+            bal = f"{usdt.availableBalance:.2f} USDT" if usdt else "No USDT found"
+            print(f" API OK | Balance: {bal}")
+        else:
+            print(f" API FAILED: {res.message}")
+            print(" WARNING: Bot will start but trades may fail!")
 
-    TESTNET_STATUS = "TRUE" if IS_TESTNET else "FALSE"
-    print(f"\nTESTNET STATUS: {TESTNET_STATUS}")
+        asyncio.create_task(resume_monitoring())
 
-    client.run_until_disconnected()
+        TESTNET_STATUS = "TRUE" if IS_TESTNET else "FALSE"
+        print(f"\nTESTNET STATUS: {TESTNET_STATUS}")
+
+        await client.run_until_disconnected()
+
+    client.loop.run_until_complete(startup())

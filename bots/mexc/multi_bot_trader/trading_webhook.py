@@ -220,6 +220,19 @@ async def webhook(request: Request):
         raise HTTPException(status_code=500, detail=f"Internal server error: {e}")
 
 
+async def check_api_connections():
+    print(" Checking MEXC API connections...")
+    for name, cfg in ACCOUNTS.items():
+        api = MexcFuturesAPI(token=cfg["token"], testnet=IS_TESTNET)
+        res = await api.get_user_assets()
+        if res.success:
+            usdt = next((a for a in res.data if a.currency == "USDT"), None)
+            bal = f"{usdt.availableBalance:.2f} USDT" if usdt else "No USDT found"
+            print(f"  {name}: OK | {bal} | Pair: {cfg['pair']}")
+        else:
+            print(f"  {name}: FAILED - {res.message}")
+
 if __name__ == "__main__":
     print("Starting Multi-Account MEXC Trading Webhook...")
+    asyncio.run(check_api_connections())
     uvicorn.run(app, host="0.0.0.0", port=80, log_config=None)

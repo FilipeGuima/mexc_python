@@ -34,18 +34,33 @@ class BlofinOrderRequest:
     reduceOnly: Optional[str] = "false"
     clientOid: Optional[str] = None
 
+class CloseReason(Enum):
+    """Reason why a position was closed"""
+    TP = "take_profit"
+    SL = "stop_loss"
+    MANUAL = "manual"
+    LIQUIDATION = "liquidation"
+    UNKNOWN = "unknown"
+
+
 @dataclass
 class PositionInfo:
     """Standardized Position Info for the bot"""
     positionId: str
     symbol: str
     holdVol: float
-    positionType: str
+    positionType: str  # "long", "short", "net"
     openAvgPrice: float
     liquidatePrice: float
     unrealized: float
+    unrealizedPnlRatio: float  # PnL as percentage
     leverage: int
     marginMode: str
+    marginRatio: float  # How close to liquidation
+    margin: float  # Initial/maintenance margin
+    markPrice: float  # Current mark price
+    createTime: str
+    updateTime: str
 
 @dataclass
 class AssetInfo:

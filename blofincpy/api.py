@@ -1,11 +1,44 @@
 import aiohttp
+import asyncio
 import json
+import time
+import logging
 from typing import Optional, List, Dict, Any
 from .sign import get_auth_headers
 from .blofinTypes import (
     BlofinOrderRequest, OrderSide, OrderType, MarginMode,
-    PositionSide, PositionInfo, AssetInfo
+    PositionSide, PositionInfo, AssetInfo, CloseReason
 )
+
+logger = logging.getLogger("BlofinAPI")
+
+
+class RateLimiter:
+    """Simple rate limiter to prevent API throttling."""
+    def __init__(self, max_requests: int = 8, per_seconds: float = 1.0):
+        self.max_requests = max_requests
+        self.per_seconds = per_seconds
+        self.requests = []
+        self._lock = asyncio.Lock()
+
+    async def acquire(self):
+        async with self._lock:
+            now = time.time()
+            # Remove old requests outside the window
+            self.requests = [t for t in self.requests if now - t < self.per_seconds]
+
+            if len(self.requests) >= self.max_requests:
+                # Wait until oldest request expires
+                sleep_time = self.per_seconds - (now - self.requests[0])
+                if sleep_time > 0:
+                    await asyncio.sleep(sleep_time)
+                self.requests = self.requests[1:]
+
+            self.requests.append(time.time())
+
+
+# Shared rate limiter across all API instances
+_global_rate_limiter = RateLimiter(max_requests=8, per_seconds=1.0)
 
 
 class BlofinFuturesAPI:
@@ -13,6 +46,7 @@ class BlofinFuturesAPI:
         self.api_key = api_key
         self.secret_key = secret_key
         self.passphrase = passphrase
+        self.rate_limiter = _global_rate_limiter  # Share across instances
 
         if testnet:
             self.base_url = "https://demo-trading-openapi.blofin.com"
@@ -21,6 +55,8 @@ class BlofinFuturesAPI:
 
     async def _make_request(self, method: str, endpoint: str, params: Optional[Dict] = None,
                             body: Optional[Dict] = None):
+        # Rate limit before making request
+        await self.rate_limiter.acquire()
         url = f"{self.base_url}{endpoint}"
         request_path = endpoint
 
@@ -51,6 +87,11 @@ class BlofinFuturesAPI:
                     headers=headers,
                     data=data_payload
             ) as response:
+                # Log rate limit headers if present (helps debug limits)
+                rate_limit = response.headers.get('X-RateLimit-Limit')
+                rate_remaining = response.headers.get('X-RateLimit-Remaining')
+                if rate_remaining and int(rate_remaining) < 10:
+                    logger.warning(f"Rate limit low: {rate_remaining}/{rate_limit} remaining")
 
                 try:
                     return await response.json(content_type=None)
@@ -96,54 +137,99 @@ class BlofinFuturesAPI:
     # --- Positions ---
     async def get_open_positions(self, symbol: Optional[str] = None) -> List[PositionInfo]:
         """
-        Get open positions. Pass symbol (instId) for faster, more accurate results.
-        Returns empty list on API error (check logs for details).
-        Note: Demo API may not support this endpoint (error 152404).
+        Get open positions with full details.
+        Pass symbol (instId) for faster, more accurate results.
+        Returns empty list on API error.
         """
-        params = {"instType": "SWAP"}
-
-        # Pass instId to API when available - reduces latency and ensures correct data
+        params = {}
         if symbol:
             params["instId"] = symbol
 
-        resp = await self._make_request("GET", "/api/v1/trade/positions", params=params)
+        resp = await self._make_request("GET", "/api/v1/account/positions", params=params)
 
-        import logging
-        logger = logging.getLogger("BlofinAPI")
-
-        # Check for API errors
         code = resp.get("code", "error")
         if code != "0":
             logger.warning(f"get_open_positions API error: code={code}, msg={resp.get('msg', 'Unknown')}")
-            return []  # Return empty on error - caller should use fallback methods
-
-        logger.debug(f"Positions response: {resp}")
+            return []
 
         positions = []
         data_obj = resp.get("data", [])
         source_list = data_obj if isinstance(data_obj, list) else []
 
         for item in source_list:
-            # Skip positions with 0 size
             hold_vol = float(item.get("positions", 0))
             if hold_vol == 0:
                 continue
 
             pos = PositionInfo(
-                positionId=item.get("posId", ""),
+                positionId=item.get("positionId", ""),
                 symbol=item.get("instId", ""),
-                holdVol=hold_vol,
-                positionType=item.get("positionSide", ""),
-                openAvgPrice=float(item.get("avgPx", 0)),
-                liquidatePrice=float(item.get("liqPx", 0) or 0),
-                unrealized=float(item.get("unrealizedPl", 0)),
+                holdVol=abs(hold_vol),  # Use absolute value
+                positionType=item.get("positionSide", "net"),
+                openAvgPrice=float(item.get("averagePrice", 0)),
+                liquidatePrice=float(item.get("liquidationPrice", 0) or 0),
+                unrealized=float(item.get("unrealizedPnl", 0)),
+                unrealizedPnlRatio=float(item.get("unrealizedPnlRatio", 0)),
                 leverage=int(item.get("leverage", 1)),
-                marginMode=item.get("marginMode", "cross")
+                marginMode=item.get("marginMode", "cross"),
+                marginRatio=float(item.get("marginRatio", 0)),
+                margin=float(item.get("margin", 0) or item.get("initialMargin", 0) or 0),
+                markPrice=float(item.get("markPrice", 0)),
+                createTime=item.get("createTime", ""),
+                updateTime=item.get("updateTime", "")
             )
             positions.append(pos)
 
-        logger.info(f"Found {len(positions)} open positions for {symbol or 'all symbols'}")
         return positions
+
+    async def get_position_close_reason(self, symbol: str) -> CloseReason:
+        """
+        Determine why a position was closed by checking TPSL and order history.
+        Returns CloseReason enum.
+        """
+        # Check TPSL history first
+        tpsl_resp = await self._make_request(
+            "GET", "/api/v1/trade/orders-tpsl-history",
+            params={"instId": symbol, "limit": "5"}
+        )
+
+        if tpsl_resp.get("code") == "0":
+            data = tpsl_resp.get("data", [])
+            if data:
+                recent = data[0]
+                state = recent.get("state", "")
+                order_cat = recent.get("orderCategory", "")
+
+                if state in ["filled", "effective", "triggered"]:
+                    # Check which trigger was hit
+                    tp_price = recent.get("tpTriggerPrice")
+                    sl_price = recent.get("slTriggerPrice")
+
+                    if order_cat == "tp" or (tp_price and tp_price != "0"):
+                        return CloseReason.TP
+                    elif order_cat == "sl" or (sl_price and sl_price != "0"):
+                        return CloseReason.SL
+
+        # Check regular order history for manual close or liquidation
+        order_resp = await self._make_request(
+            "GET", "/api/v1/trade/orders-history",
+            params={"instId": symbol, "limit": "5"}
+        )
+
+        if order_resp.get("code") == "0":
+            data = order_resp.get("data", [])
+            for order in data:
+                order_cat = order.get("orderCategory", "")
+                if order_cat in ["full_liquidation", "partial_liquidation"]:
+                    return CloseReason.LIQUIDATION
+                elif order_cat == "tp":
+                    return CloseReason.TP
+                elif order_cat == "sl":
+                    return CloseReason.SL
+                elif order.get("reduceOnly") == "true" and order.get("state") == "filled":
+                    return CloseReason.MANUAL
+
+        return CloseReason.UNKNOWN
 
     # --- Leverage ---
     async def set_leverage(self, symbol: str, leverage: int, margin_mode: str = "isolated", pos_side: str = "net"):

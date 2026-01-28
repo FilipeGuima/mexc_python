@@ -14,5 +14,7 @@ __pycache__/
 .env
 
 *.egg-info/
+nul
+.claude/settings.local.json
 
 CLAUDE.md
