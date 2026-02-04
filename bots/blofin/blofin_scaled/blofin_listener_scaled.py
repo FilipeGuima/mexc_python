@@ -670,8 +670,41 @@ async def execute_signal_trade(data):
     tp2_price = tps[1] if len(tps) >= 2 else None
     tp3_price = tps[2] if len(tps) >= 3 else None
 
+    # ===========================================
+    # VALIDATION: Check for required TP/SL
+    # ===========================================
+    validation_errors = []
+
+    # Check for SL
+    if not sl_price:
+        validation_errors.append("NO STOP LOSS (SL) in signal")
+
+    # Check for TP1 (required for scaled strategy)
     if not tp1_price:
-        return "⚠️ Scaled strategy requires at least TP1"
+        validation_errors.append("NO TAKE PROFIT 1 (TP1) in signal - Required for scaled strategy")
+
+    # If any validation errors, reject the signal with clear message
+    if validation_errors:
+        error_msg = (
+            f"\n{'='*50}\n"
+            f"❌ **ORDER REJECTED** - {formatted_symbol}\n"
+            f"   Reason: Signal missing required TP/SL\n"
+            f"   \n"
+            f"   Missing:\n"
+        )
+        for err in validation_errors:
+            error_msg += f"   • {err}\n"
+        error_msg += (
+            f"   \n"
+            f"   Raw signal data:\n"
+            f"   • Entry: {entry_price}\n"
+            f"   • SL: {sl_price or 'MISSING'}\n"
+            f"   • TPs: {tps if tps else 'MISSING'}\n"
+            f"   \n"
+            f"   Note: Scaled strategy requires TP1+SL minimum.\n"
+            f"{'='*50}"
+        )
+        return error_msg
 
     if not tp2_price:
         logger.warning("No TP2 found - will use TP1 * 1.5 as fallback")
@@ -680,12 +713,25 @@ async def execute_signal_trade(data):
     if not tp3_price:
         logger.warning("No TP3 found - scaled exit may not complete fully")
 
-    # Validate entry price
+    # ===========================================
+    # VALIDATION: Entry price must be a number
+    # ===========================================
     if not isinstance(entry_price, (int, float)):
         try:
             entry_price = float(str(entry_price).replace(',', ''))
         except (ValueError, TypeError):
-            return f"⚠️ Invalid Entry Price: {entry_price}"
+            error_msg = (
+                f"\n{'='*50}\n"
+                f"❌ **ORDER REJECTED** - {formatted_symbol}\n"
+                f"   Reason: INVALID ENTRY PRICE\n"
+                f"   \n"
+                f"   Entry value: '{entry_price}'\n"
+                f"   Expected: A numeric value (e.g., 95000, 0.55)\n"
+                f"   \n"
+                f"   Cannot place limit order without valid entry price.\n"
+                f"{'='*50}"
+            )
+            return error_msg
 
     blofin_side = "buy" if "LONG" in side.name.upper() else "sell"
     pos_side = "net"
@@ -695,14 +741,30 @@ async def execute_signal_trade(data):
     usdt_asset = next((a for a in assets if a.currency == "USDT"), None)
 
     if not usdt_asset:
-        return "⚠️ Wallet Error: USDT balance not found."
+        return (
+            f"\n{'='*50}\n"
+            f"❌ **ORDER REJECTED** - {formatted_symbol}\n"
+            f"   Reason: WALLET ERROR\n"
+            f"   \n"
+            f"   USDT balance not found in account.\n"
+            f"   Please ensure you have USDT available for trading.\n"
+            f"{'='*50}"
+        )
 
     balance = usdt_asset.availableBalance
 
     # Get instrument info
     inst_info = await BlofinAPI.get_instrument_info(formatted_symbol)
     if not inst_info:
-        return f"⚠️ Instrument Error: Could not get contract details for {formatted_symbol}"
+        return (
+            f"\n{'='*50}\n"
+            f"❌ **ORDER REJECTED** - {formatted_symbol}\n"
+            f"   Reason: INSTRUMENT ERROR\n"
+            f"   \n"
+            f"   Could not get contract details for {formatted_symbol}.\n"
+            f"   This symbol may not exist or trading may be unavailable.\n"
+            f"{'='*50}"
+        )
 
     contract_value = float(inst_info.get('contractValue', 1))
     lot_size = float(inst_info.get('lotSize', 1))
@@ -735,7 +797,15 @@ async def execute_signal_trade(data):
         current_price = float(ticker_res['data'][0]['last'])
 
     if current_price == 0:
-        return f"⚠️ Price Error: Could not fetch current price for {formatted_symbol}"
+        return (
+            f"\n{'='*50}\n"
+            f"❌ **ORDER REJECTED** - {formatted_symbol}\n"
+            f"   Reason: PRICE FETCH ERROR\n"
+            f"   \n"
+            f"   Could not fetch current market price for {formatted_symbol}.\n"
+            f"   Market may be closed or API unavailable.\n"
+            f"{'='*50}"
+        )
 
     # Smart entry logic
     use_market_order = False
@@ -815,7 +885,26 @@ async def execute_signal_trade(data):
             return order_msg
         else:
             error_msg = res.get('msg', 'Unknown Error') if res else "No Response"
-            return f"❌ **Market Order Failed**\n   Error: {error_msg}"
+            error_data = res.get('data', [])
+            if error_data and isinstance(error_data, list) and error_data[0].get('msg'):
+                error_msg = error_data[0].get('msg')
+            return (
+                f"\n{'='*50}\n"
+                f"❌ **MARKET ORDER FAILED** - {formatted_symbol}\n"
+                f"   Side: {blofin_side.upper()}\n"
+                f"   \n"
+                f"   API Error: {error_msg}\n"
+                f"   \n"
+                f"   Order Details:\n"
+                f"   • Entry: Market (~{current_price})\n"
+                f"   • Size: {final_vol}\n"
+                f"   • Leverage: x{leverage}\n"
+                f"   • TP1: {tp1_price or 'None'}\n"
+                f"   • TP2: {tp2_price or 'None'}\n"
+                f"   • TP3: {tp3_price or 'None'}\n"
+                f"   • SL: {sl_price or 'None'}\n"
+                f"{'='*50}"
+            )
 
     else:
         logger.info(f" Placing LIMIT {blofin_side.upper()} {formatted_symbol} @ {entry_price} x{leverage}")
@@ -862,7 +951,27 @@ async def execute_signal_trade(data):
             return order_msg
         else:
             error_msg = res.get('msg', 'Unknown Error') if res else "No Response"
-            return f"❌ **Limit Order Failed**\n   Error: {error_msg}"
+            error_data = res.get('data', [])
+            if error_data and isinstance(error_data, list) and error_data[0].get('msg'):
+                error_msg = error_data[0].get('msg')
+            return (
+                f"\n{'='*50}\n"
+                f"❌ **LIMIT ORDER FAILED** - {formatted_symbol}\n"
+                f"   Side: {blofin_side.upper()}\n"
+                f"   \n"
+                f"   API Error: {error_msg}\n"
+                f"   \n"
+                f"   Order Details:\n"
+                f"   • Entry: {entry_price}\n"
+                f"   • Current Price: {current_price}\n"
+                f"   • Size: {final_vol}\n"
+                f"   • Leverage: x{leverage}\n"
+                f"   • TP1: {tp1_price or 'None'}\n"
+                f"   • TP2: {tp2_price or 'None'}\n"
+                f"   • TP3: {tp3_price or 'None'}\n"
+                f"   • SL: {sl_price or 'None'}\n"
+                f"{'='*50}"
+            )
 
 
 # --- PARSERS ---

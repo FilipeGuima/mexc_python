@@ -345,23 +345,57 @@ async def execute_signal_trade(data):
 
     assets_response = await MexcAPI.get_user_assets()
     if not assets_response.success:
-        return f"  API Token Failure: Could not fetch assets ({assets_response.message})"
+        return (
+            f"\n{'='*50}\n"
+            f"❌ **ORDER REJECTED** - {symbol}\n"
+            f"   Reason: API ERROR\n"
+            f"   \n"
+            f"   Could not fetch account assets.\n"
+            f"   Error: {assets_response.message}\n"
+            f"{'='*50}"
+        )
 
     target_asset = next((a for a in assets_response.data if a.currency == quote_currency), None)
     if not target_asset:
-        return f"  Wallet Error: {quote_currency} not found in wallet."
+        return (
+            f"\n{'='*50}\n"
+            f"❌ **ORDER REJECTED** - {symbol}\n"
+            f"   Reason: WALLET ERROR\n"
+            f"   \n"
+            f"   {quote_currency} balance not found in account.\n"
+            f"   Please ensure you have {quote_currency} available for trading.\n"
+            f"{'='*50}"
+        )
 
     balance = target_asset.availableBalance
 
     ticker_res = await MexcAPI.get_ticker(symbol)
     if not ticker_res.success or not ticker_res.data:
-        return f"  Pair Error: Ticker data for {symbol} unavailable. Does this pair exist?"
+        return (
+            f"\n{'='*50}\n"
+            f"❌ **ORDER REJECTED** - {symbol}\n"
+            f"   Reason: PRICE FETCH ERROR\n"
+            f"   \n"
+            f"   Could not fetch ticker data for {symbol}.\n"
+            f"   Error: {ticker_res.message or 'No data returned'}\n"
+            f"   \n"
+            f"   This symbol may not exist or market may be closed.\n"
+            f"{'='*50}"
+        )
 
     current_price = ticker_res.data.get('lastPrice')
 
     contract_res = await MexcAPI.get_contract_details(symbol)
     if not contract_res.success:
-        return f"  Contract Error: Could not fetch details for {symbol}. ({contract_res.message})"
+        return (
+            f"\n{'='*50}\n"
+            f"❌ **ORDER REJECTED** - {symbol}\n"
+            f"   Reason: CONTRACT ERROR\n"
+            f"   \n"
+            f"   Could not fetch contract details for {symbol}.\n"
+            f"   Error: {contract_res.message}\n"
+            f"{'='*50}"
+        )
 
     contract_size = contract_res.data.get('contractSize')
 
@@ -372,7 +406,21 @@ async def execute_signal_trade(data):
     vol = int(position_value / (contract_size * current_price))
 
     if vol == 0:
-        return f"  Volume Error: Calculated volume is 0. (Bal: {balance:.2f} {quote_currency}, Lev: {leverage})"
+        return (
+            f"\n{'='*50}\n"
+            f"❌ **ORDER REJECTED** - {symbol}\n"
+            f"   Reason: INSUFFICIENT BALANCE\n"
+            f"   \n"
+            f"   Calculated volume is 0 contracts.\n"
+            f"   \n"
+            f"   Account Details:\n"
+            f"   • Balance: {balance:.2f} {quote_currency}\n"
+            f"   • Size: {equity_perc}%\n"
+            f"   • Leverage: x{leverage}\n"
+            f"   \n"
+            f"   Increase balance or position size percentage.\n"
+            f"{'='*50}"
+        )
 
     logger.info(f" Executing {side.name} {symbol} x{leverage} | Vol: {vol}")
 
@@ -392,7 +440,21 @@ async def execute_signal_trade(data):
 
     order_res = await MexcAPI.create_order(open_req)
     if not order_res.success:
-        return f"  Execution Failed: {order_res.message}"
+        return (
+            f"\n{'='*50}\n"
+            f"❌ **ORDER FAILED** - {symbol}\n"
+            f"   Side: {side.name}\n"
+            f"   \n"
+            f"   API Error: {order_res.message}\n"
+            f"   \n"
+            f"   Order Details:\n"
+            f"   • Type: MARKET\n"
+            f"   • Volume: {vol}\n"
+            f"   • Leverage: x{leverage}\n"
+            f"   • TP1: {final_tp_price or 'None'}\n"
+            f"   • SL: {final_sl_price or 'None'}\n"
+            f"{'='*50}"
+        )
 
     asyncio.create_task(monitor_trade(symbol, vol, data['tps']))
 
@@ -434,8 +496,35 @@ async def handler(event):
             # await client.send_message('me', res)
 
         elif result['type'] == 'TRADE':
-            if not result.get('sl') or not result.get('tps'):
-                print(f" Signal skipped for {symbol}: Missing SL or TP. Waiting for full signal.")
+            # ===========================================
+            # VALIDATION: Check for required TP/SL
+            # ===========================================
+            validation_errors = []
+
+            if not result.get('sl'):
+                validation_errors.append("NO STOP LOSS (SL) in signal")
+            if not result.get('tps'):
+                validation_errors.append("NO TAKE PROFIT (TP) levels in signal")
+
+            if validation_errors:
+                error_msg = (
+                    f"\n{'='*50}\n"
+                    f"❌ **ORDER REJECTED** - {symbol}\n"
+                    f"   Reason: Signal missing required TP/SL\n"
+                    f"   \n"
+                    f"   Missing:\n"
+                )
+                for err in validation_errors:
+                    error_msg += f"   • {err}\n"
+                error_msg += (
+                    f"   \n"
+                    f"   Raw signal data:\n"
+                    f"   • Entry: {result.get('entry', 'N/A')}\n"
+                    f"   • SL: {result.get('sl') or 'MISSING'}\n"
+                    f"   • TPs: {result.get('tps') or 'MISSING'}\n"
+                    f"{'='*50}"
+                )
+                print(error_msg)
                 return
             print(f"  Processing TRADE for {symbol}...")
             res = await execute_signal_trade(result)
