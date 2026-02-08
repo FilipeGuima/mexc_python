@@ -10,7 +10,8 @@ from mexcpy.mexcTypes import (
     OrderSide, CreateOrderRequest, OpenType, OrderType,
     TriggerOrderRequest, TriggerType, TriggerPriceType, ExecuteCycle
 )
-from mexcpy.config import API_ID, API_HASH, TARGET_CHATS, BREAKEVEN_TOKEN, SESSION_BREAKEVEN
+from mexcpy.config import API_ID, API_HASH, TARGET_CHATS, BREAKEVEN_TOKEN, SESSION_BREAKEVEN, MEXC_TESTNET
+from common.utils import adjust_price_to_step, validate_signal_tp_sl
 
 # --- CONFIGURATION ---
 if not BREAKEVEN_TOKEN or not API_ID:
@@ -23,24 +24,8 @@ START_TIME = datetime.now(timezone.utc)
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-IS_TESTNET = False
-
-MexcAPI = MexcFuturesAPI(token=BREAKEVEN_TOKEN, testnet=IS_TESTNET)
+MexcAPI = MexcFuturesAPI(token=BREAKEVEN_TOKEN, testnet=MEXC_TESTNET)
 client = TelegramClient(str(SESSION_BREAKEVEN), API_ID, API_HASH)
-
-# --- HELPER FUNCTIONS ---
-def adjust_price_to_step(price, step_size):
-    if not price:
-        return None
-    if not step_size or step_size == 0:
-        return price
-
-    step_str = f"{float(step_size):.16f}".rstrip('0')
-    precision = 0
-    if '.' in step_str:
-        precision = len(step_str.split('.')[1])
-
-    return round(price, precision)
 
 # --- TRADE LOGIC ---
 
@@ -496,35 +481,10 @@ async def handler(event):
             # await client.send_message('me', res)
 
         elif result['type'] == 'TRADE':
-            # ===========================================
-            # VALIDATION: Check for required TP/SL
-            # ===========================================
-            validation_errors = []
-
-            if not result.get('sl'):
-                validation_errors.append("NO STOP LOSS (SL) in signal")
-            if not result.get('tps'):
-                validation_errors.append("NO TAKE PROFIT (TP) levels in signal")
-
-            if validation_errors:
-                error_msg = (
-                    f"\n{'='*50}\n"
-                    f"❌ **ORDER REJECTED** - {symbol}\n"
-                    f"   Reason: Signal missing required TP/SL\n"
-                    f"   \n"
-                    f"   Missing:\n"
-                )
-                for err in validation_errors:
-                    error_msg += f"   • {err}\n"
-                error_msg += (
-                    f"   \n"
-                    f"   Raw signal data:\n"
-                    f"   • Entry: {result.get('entry', 'N/A')}\n"
-                    f"   • SL: {result.get('sl') or 'MISSING'}\n"
-                    f"   • TPs: {result.get('tps') or 'MISSING'}\n"
-                    f"{'='*50}"
-                )
-                print(error_msg)
+            # Validate TP/SL
+            validation_error = validate_signal_tp_sl(result)
+            if validation_error:
+                print(validation_error)
                 return
             print(f"  Processing TRADE for {symbol}...")
             res = await execute_signal_trade(result)
@@ -554,7 +514,7 @@ if __name__ == "__main__":
 
         asyncio.create_task(resume_monitoring())
 
-        TESTNET_STATUS = "TRUE" if IS_TESTNET else "FALSE"
+        TESTNET_STATUS = "TRUE" if MEXC_TESTNET else "FALSE"
         print(f"\nTESTNET STATUS: {TESTNET_STATUS}")
 
         await client.run_until_disconnected()

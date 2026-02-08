@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 # --- IMPORTS ---
 from mexcpy.api import MexcFuturesAPI
 from mexcpy.mexcTypes import OrderSide, PositionType, CreateOrderRequest, OpenType, OrderType
-from mexcpy.config import BASE_DIR
+from mexcpy.config import BASE_DIR, MEXC_TESTNET
 
 load_dotenv(BASE_DIR / ".env")
 
@@ -35,7 +35,6 @@ while True:
 
 print(f"Loaded {len(ACCOUNTS)} bots from configuration.")
 
-IS_TESTNET = True
 
 # --- DEFAULT TRADING PARAMETERS ---
 DEFAULT_EQUITY_PERC = 0.5
@@ -186,7 +185,7 @@ async def webhook(request: Request):
         if not token or not default_pair:
             raise ValueError(f"Configuration error for '{account_id}': Missing token or pair.")
 
-        current_api = MexcFuturesAPI(token=token, testnet=IS_TESTNET)
+        current_api = MexcFuturesAPI(token=token, testnet=MEXC_TESTNET)
 
         result = {}
 
@@ -223,7 +222,7 @@ async def webhook(request: Request):
 async def check_api_connections():
     print(" Checking MEXC API connections...")
     for name, cfg in ACCOUNTS.items():
-        api = MexcFuturesAPI(token=cfg["token"], testnet=IS_TESTNET)
+        api = MexcFuturesAPI(token=cfg["token"], testnet=MEXC_TESTNET)
         res = await api.get_user_assets()
         if res.success:
             usdt = next((a for a in res.data if a.currency == "USDT"), None)

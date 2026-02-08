@@ -31,6 +31,8 @@ from telethon import TelegramClient, events
 # --- PROJECT IMPORTS ---
 from blofincpy.api import BlofinFuturesAPI
 from bots.blofin.blofin_scaled.state_manager import save_state, load_state
+from common.parser import SignalParser, parse_signal
+from common.utils import adjust_price_to_step, validate_signal_tp_sl
 
 from mexcpy.config import (
     API_ID,
@@ -39,7 +41,8 @@ from mexcpy.config import (
     SESSION_SCALED,
     BLOFIN_API_KEY,
     BLOFIN_SECRET_KEY,
-    BLOFIN_PASSPHRASE
+    BLOFIN_PASSPHRASE,
+    BLOFIN_TESTNET
 )
 
 # --- CONFIGURATION CHECK ---
@@ -58,7 +61,7 @@ BlofinAPI = BlofinFuturesAPI(
     api_key=BLOFIN_API_KEY,
     secret_key=BLOFIN_SECRET_KEY,
     passphrase=BLOFIN_PASSPHRASE,
-    testnet=True
+    testnet=BLOFIN_TESTNET
 )
 
 # Telegram Client
@@ -203,21 +206,6 @@ def save_positions():
 
 
 # --- HELPER FUNCTIONS ---
-def adjust_price_to_step(price, step_size):
-    """Rounds a price to the nearest valid step size."""
-    if not price:
-        return None
-    if not step_size or step_size == 0:
-        return price
-
-    step_str = f"{float(step_size):.16f}".rstrip('0')
-    precision = 0
-    if '.' in step_str:
-        precision = len(step_str.split('.')[1])
-
-    return round(price, precision)
-
-
 def round_size_to_lot(size, lot_size):
     """Rounds size to valid lot size."""
     if not lot_size or lot_size == 0:
@@ -673,38 +661,17 @@ async def execute_signal_trade(data):
     # ===========================================
     # VALIDATION: Check for required TP/SL
     # ===========================================
-    validation_errors = []
+    validation_error = validate_signal_tp_sl(data)
+    if validation_error:
+        return validation_error
 
-    # Check for SL
-    if not sl_price:
-        validation_errors.append("NO STOP LOSS (SL) in signal")
-
-    # Check for TP1 (required for scaled strategy)
     if not tp1_price:
-        validation_errors.append("NO TAKE PROFIT 1 (TP1) in signal - Required for scaled strategy")
-
-    # If any validation errors, reject the signal with clear message
-    if validation_errors:
-        error_msg = (
+        return (
             f"\n{'='*50}\n"
             f"❌ **ORDER REJECTED** - {formatted_symbol}\n"
-            f"   Reason: Signal missing required TP/SL\n"
-            f"   \n"
-            f"   Missing:\n"
-        )
-        for err in validation_errors:
-            error_msg += f"   • {err}\n"
-        error_msg += (
-            f"   \n"
-            f"   Raw signal data:\n"
-            f"   • Entry: {entry_price}\n"
-            f"   • SL: {sl_price or 'MISSING'}\n"
-            f"   • TPs: {tps if tps else 'MISSING'}\n"
-            f"   \n"
-            f"   Note: Scaled strategy requires TP1+SL minimum.\n"
+            f"   Reason: NO TP1 - Required for scaled strategy\n"
             f"{'='*50}"
         )
-        return error_msg
 
     if not tp2_price:
         logger.warning("No TP2 found - will use TP1 * 1.5 as fallback")
@@ -733,7 +700,7 @@ async def execute_signal_trade(data):
             )
             return error_msg
 
-    blofin_side = "buy" if "LONG" in side.name.upper() else "sell"
+    blofin_side = "buy" if side == "LONG" else "sell"
     pos_side = "net"
 
     # Fetch Balance
@@ -972,112 +939,6 @@ async def execute_signal_trade(data):
                 f"   • SL: {sl_price or 'None'}\n"
                 f"{'='*50}"
             )
-
-
-# --- PARSERS ---
-
-class SignalParser:
-    NUM_PATTERN = r'([\d,]+\.?\d*)'
-    HIDDEN_CHARS = [
-        '\u200b', '\u200c', '\u200d', '\u200e', '\u200f',
-        '\u00a0', '\u2060', '\ufeff', '\u00ad', '\u2007',
-        '\u2008', '\u2009', '\u200a', '\u202f', '\u205f', '\u3000',
-    ]
-
-    @staticmethod
-    def _extract_number(text: str) -> float | None:
-        if not text:
-            return None
-        cleaned = text.replace(',', '')
-        try:
-            return float(cleaned)
-        except ValueError:
-            return None
-
-    @classmethod
-    def _clean_text(cls, text: str) -> str:
-        for char in cls.HIDDEN_CHARS:
-            text = text.replace(char, ' ')
-        return text.upper()
-
-    @classmethod
-    def parse(cls, text: str, debug: bool = True) -> dict | None:
-        if debug:
-            print(f" DEBUG RAW: {repr(text)}")
-
-        text_upper = cls._clean_text(text)
-        data = {}
-
-        if "TARGET HIT" in text_upper or "PROFIT:" in text_upper:
-            if debug:
-                print(" Ignored: Status/Profit update")
-            return None
-
-        pair_match = re.search(r'PAIR[\W_]*([A-Z0-9]+)[\W_]*[/_:-]?[\W_]*([A-Z0-9]+)', text_upper)
-        if not pair_match:
-            if debug:
-                print(" Parsing failed: No PAIR found.")
-            return None
-        data['symbol'] = f"{pair_match.group(1)}_{pair_match.group(2)}"
-
-        side_match = re.search(r'SIDE[\W_]*(LONG|SHORT)', text_upper)
-        if not side_match:
-            if debug:
-                print(" Parsing failed: No SIDE found.")
-            return None
-        direction = side_match.group(1)
-        from mexcpy.mexcTypes import OrderSide as MexcOrderSide
-        data['side'] = MexcOrderSide.OpenLong if direction == "LONG" else MexcOrderSide.OpenShort
-
-        size_match = re.search(r'SIZE[\W_]*(\d+)[\W_]*(?:-[\W_]*(\d+))?[\W_]*%', text_upper)
-        if size_match:
-            val1 = float(size_match.group(1))
-            val2 = float(size_match.group(2)) if size_match.group(2) else val1
-            data['equity_perc'] = (val1 + val2) / 2
-        else:
-            data['equity_perc'] = 1.0
-
-        entry_match = re.search(r'ENTRY[\W_]*' + cls.NUM_PATTERN + r'(?:[\W_]*-[\W_]*' + cls.NUM_PATTERN + r')?',
-                                text_upper)
-        if entry_match:
-            entry1 = cls._extract_number(entry_match.group(1))
-            entry2 = cls._extract_number(entry_match.group(2))
-            if entry1 and entry2:
-                data['entry'] = (entry1 + entry2) / 2
-            elif entry1:
-                data['entry'] = entry1
-            else:
-                data['entry'] = "Market"
-        else:
-            data['entry'] = "Market"
-
-        sl_match = re.search(r'SL[\W_]*' + cls.NUM_PATTERN, text_upper)
-        data['sl'] = cls._extract_number(sl_match.group(1)) if sl_match else None
-
-        lev_match = re.search(r'LEV(?:ERAGE)?[\W_]*(\d+)', text_upper)
-        data['leverage'] = int(lev_match.group(1)) if lev_match else 20
-
-        tp_matches = re.findall(r'TP\d[\W_]*' + cls.NUM_PATTERN + r'(?!\s*R:R)', text_upper)
-        real_tps = []
-        for tp_str in tp_matches:
-            tp_val = cls._extract_number(tp_str)
-            if tp_val:
-                real_tps.append(tp_val)
-
-        data['tps'] = real_tps[:3]
-        data['type'] = 'TRADE'
-
-        if debug:
-            print(f" PARSED SIGNAL: {data}")
-        return data
-
-
-def parse_signal(text: str) -> dict | None:
-    try:
-        return SignalParser.parse(text, debug=True)
-    except Exception as e:
-        logger.error(f"Parse Error: {e}")
-        return None
 
 
 # --- TELEGRAM HANDLER ---

@@ -12,7 +12,9 @@ from mexcpy.mexcTypes import (
     OrderSide, CreateOrderRequest, OpenType, OrderType,
     TriggerOrderRequest, TriggerType, TriggerPriceType, ExecuteCycle
 )
-from mexcpy.config import API_ID, API_HASH, TARGET_CHATS, TP1_TOKEN, SESSION_TP1
+from mexcpy.config import API_ID, API_HASH, TARGET_CHATS, TP1_TOKEN, SESSION_TP1, MEXC_TESTNET
+from common.parser import SignalParser, UpdateParser, parse_signal
+from common.utils import adjust_price_to_step, validate_signal_tp_sl
 
 START_TIME = datetime.now(timezone.utc)
 
@@ -20,25 +22,8 @@ START_TIME = datetime.now(timezone.utc)
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-IS_TESTNET = True
-
-MexcAPI = MexcFuturesAPI(token=TP1_TOKEN, testnet=IS_TESTNET)
+MexcAPI = MexcFuturesAPI(token=TP1_TOKEN, testnet=MEXC_TESTNET)
 client = TelegramClient(str(SESSION_TP1), API_ID, API_HASH)
-
-
-# --- HELPER FUNCTIONS ---
-def adjust_price_to_step(price, step_size):
-    if not price:
-        return None
-    if not step_size or step_size == 0:
-        return price
-
-    step_str = f"{float(step_size):.16f}".rstrip('0')
-    precision = 0
-    if '.' in step_str:
-        precision = len(step_str.split('.')[1])
-
-    return round(price, precision)
 
 
 async def monitor_trade(symbol: str, start_vol: int, targets: list, is_limit_order: bool = False):
@@ -155,145 +140,6 @@ async def monitor_trade(symbol: str, start_vol: int, targets: list, is_limit_ord
             print(f" Monitor Exception for {symbol}: {e}")
             traceback.print_exc()
             await asyncio.sleep(5)
-
-
-# --- PARSERS ---
-
-class SignalParser:
-    """
-    Robust signal parser for NEW TRADES.
-    Handles: "PAIR: BTC/USDT", "SIDE: LONG", "TP1: 0.55", ignoring "R:R" ratios.
-    """
-    NUM_PATTERN = r'([\d,]+\.?\d*)'
-
-    @staticmethod
-    def _extract_number(text: str) -> float | None:
-        if not text: return None
-        cleaned = text.replace(',', '')
-        try:
-            return float(cleaned)
-        except ValueError:
-            return None
-
-    @staticmethod
-    def _normalize_text(text: str) -> str:
-        return text.upper()
-
-    @classmethod
-    def parse(cls, text: str, debug: bool = True) -> dict | None:
-        if debug: print(f" DEBUG RAW: {repr(text)}")
-        text_upper = cls._normalize_text(text)
-        data = {}
-
-        # --- PAIR ---
-        pair_match = re.search(r'PAIR[\W_]*([A-Z0-9]+)[\W_]*[/_:-]?[\W_]*([A-Z0-9]+)', text_upper)
-        if not pair_match:
-            if debug: print(" Parsing failed: No PAIR found.")
-            return None
-        data['symbol'] = f"{pair_match.group(1)}_{pair_match.group(2)}"
-
-        # --- SIDE ---
-        side_match = re.search(r'SIDE[\W_]*(LONG|SHORT)', text_upper)
-        if not side_match:
-            if debug: print(" Parsing failed: No SIDE found.")
-            return None
-        direction = side_match.group(1)
-        data['side'] = OrderSide.OpenLong if direction == "LONG" else OrderSide.OpenShort
-
-        # --- SIZE ---
-        size_match = re.search(r'SIZE[\W_]*(\d+)[\W_]*(?:-[\W_]*(\d+))?[\W_]*%', text_upper)
-        if size_match:
-            val1 = float(size_match.group(1))
-            val2 = float(size_match.group(2)) if size_match.group(2) else val1
-            data['equity_perc'] = (val1 + val2) / 2
-        else:
-            data['equity_perc'] = 1.0
-
-        # --- ENTRY ---
-        entry_match = re.search(r'ENTRY[\W_]*' + cls.NUM_PATTERN + r'(?:[\W_]*-[\W_]*' + cls.NUM_PATTERN + r')?',
-                                text_upper)
-        if entry_match:
-            entry1 = cls._extract_number(entry_match.group(1))
-            entry2 = cls._extract_number(entry_match.group(2))
-            if entry1 and entry2:
-                data['entry'] = (entry1 + entry2) / 2
-            elif entry1:
-                data['entry'] = entry1
-            else:
-                data['entry'] = "Market"
-        else:
-            data['entry'] = "Market"
-
-        # --- STOP LOSS ---
-        sl_match = re.search(r'SL[\W_]*' + cls.NUM_PATTERN, text_upper)
-        data['sl'] = cls._extract_number(sl_match.group(1)) if sl_match else None
-
-        # --- LEVERAGE ---
-        lev_match = re.search(r'LEV(?:ERAGE)?[\W_]*(\d+)', text_upper)
-        data['leverage'] = int(lev_match.group(1)) if lev_match else 20
-
-        # --- TAKE PROFIT TARGETS ---
-        tp_matches = re.findall(r'TP\d[\W_]*' + cls.NUM_PATTERN + r'(?!\s*R:R)', text_upper)
-
-        real_tps = []
-        for tp_str in tp_matches:
-            tp_val = cls._extract_number(tp_str)
-            if tp_val:
-                real_tps.append(tp_val)
-
-        data['tps'] = real_tps[:3]
-        if debug: print(f" PARSED SIGNAL: {data}")
-        return data
-
-
-class UpdateParser:
-    """
-    Parses 'Update' messages like:
-    "ASTER/USDT #1175 change TP1 to 0.75222"
-    "BTC/USDT change SL to 94000"
-    """
-
-    @staticmethod
-    def parse(text: str, debug: bool = True) -> dict | None:
-        text_upper = text.upper()
-
-        if not any(k in text_upper for k in ["CHANGE", "ADJUST", "MOVE", "SET", "UPDATE"]):
-            return None
-
-        data = {}
-
-        pair_match = re.search(r'([A-Z0-9]+)[\W_]*[/_:-][\W_]*([A-Z0-9]+)', text_upper)
-        if not pair_match:
-            if debug: print(" Update detected but NO PAIR found. Ignoring.")
-            return None
-
-        data['symbol'] = f"{pair_match.group(1)}_{pair_match.group(2)}"
-
-
-        sl_match = re.search(r'(?:SL|STOP(?:\s*LOSS)?)\W+(?:IS\W+)?(?:NOW|TO|BE)\W+([\d,.]+)', text_upper)
-        if sl_match:
-            data['type'] = 'SL'
-            data['price'] = float(sl_match.group(1).replace(',', ''))
-            if debug: print(f" PARSED UPDATE: {data}")
-            return data
-
-        tp_match = re.search(r'(TP\d?)\W+(?:IS\W+)?(?:NOW|TO|BE)\W+([\d,.]+)', text_upper)
-        if tp_match:
-            data['type'] = tp_match.group(1)
-            data['price'] = float(tp_match.group(2).replace(',', ''))
-            if debug: print(f" PARSED UPDATE: {data}")
-            return data
-
-        return None
-
-
-def parse_signal(text: str) -> dict | None:
-    """Wrapper for backward compatibility"""
-    try:
-        return SignalParser.parse(text, debug=True)
-    except Exception as e:
-        logger.error(f"Parse Error: {e}")
-        return None
 
 
 # --- EXECUTION FUNCTIONS ---
@@ -620,36 +466,16 @@ async def handler(event):
         print("\n  New Signal Detected!")
         signal_data = parse_signal(text)
         if signal_data:
-            # ===========================================
-            # VALIDATION: Check for required TP/SL
-            # ===========================================
-            validation_errors = []
-            symbol = signal_data.get('symbol', 'UNKNOWN')
+            # Convert string side to MEXC OrderSide enum
+            if signal_data.get('side') == "LONG":
+                signal_data['side'] = OrderSide.OpenLong
+            elif signal_data.get('side') == "SHORT":
+                signal_data['side'] = OrderSide.OpenShort
 
-            if not signal_data.get('sl'):
-                validation_errors.append("NO STOP LOSS (SL) in signal")
-            if not signal_data.get('tps'):
-                validation_errors.append("NO TAKE PROFIT (TP) levels in signal")
-
-            if validation_errors:
-                error_msg = (
-                    f"\n{'='*50}\n"
-                    f"❌ **ORDER REJECTED** - {symbol}\n"
-                    f"   Reason: Signal missing required TP/SL\n"
-                    f"   \n"
-                    f"   Missing:\n"
-                )
-                for err in validation_errors:
-                    error_msg += f"   • {err}\n"
-                error_msg += (
-                    f"   \n"
-                    f"   Raw signal data:\n"
-                    f"   • Entry: {signal_data.get('entry', 'N/A')}\n"
-                    f"   • SL: {signal_data.get('sl') or 'MISSING'}\n"
-                    f"   • TPs: {signal_data.get('tps') or 'MISSING'}\n"
-                    f"{'='*50}"
-                )
-                print(error_msg)
+            # Validate TP/SL
+            validation_error = validate_signal_tp_sl(signal_data)
+            if validation_error:
+                print(validation_error)
                 return
             result = await execute_signal_trade(signal_data)
             print(result)
@@ -685,7 +511,7 @@ if __name__ == "__main__":
             print(f" API FAILED: {res.message}")
             print(" WARNING: Bot will start but trades may fail!")
 
-        TESTNET_STATUS = "TRUE" if IS_TESTNET else "FALSE"
+        TESTNET_STATUS = "TRUE" if MEXC_TESTNET else "FALSE"
         print(f"\nTESTNET STATUS: {TESTNET_STATUS}")
 
         await client.run_until_disconnected()
