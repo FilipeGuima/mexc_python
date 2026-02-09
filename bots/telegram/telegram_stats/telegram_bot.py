@@ -1,10 +1,10 @@
 import asyncio
 import logging
-from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
-from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters, Defaults
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, Defaults
 from telegram.constants import ParseMode
 from datetime import datetime, timedelta
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Tuple, Optional
 
 # --- CLEAN IMPORTS ---
 from bots.telegram.telegram_stats.exchange_adapter import (
@@ -13,19 +13,6 @@ from bots.telegram.telegram_stats.exchange_adapter import (
 )
 
 from mexcpy.config import TELEGRAM_BOT_TOKEN, STATS_ACCOUNTS
-
-# --- UI CONSTANTS ---
-TOKEN_MENU_PAIRS = [
-    ["BTC_USDT", "ETH_USDT", "SOL_USDT"],
-    ["DOGE_USDT", "SUI_USDT"],
-    ["/stats", "/positions", "/help"]
-]
-
-KEYBOARD_MARKUP = ReplyKeyboardMarkup(
-    TOKEN_MENU_PAIRS,
-    resize_keyboard=True,
-    is_persistent=True
-)
 
 # --- CONFIGURATION CHECKS ---
 if not TELEGRAM_BOT_TOKEN:
@@ -46,6 +33,65 @@ API_CLIENTS: Dict[str, ExchangeAdapter] = {
     account['account_id']: create_adapter(account)
     for account in STATS_ACCOUNTS
 }
+
+TELEGRAM_MAX_MESSAGE_LENGTH = 4096
+
+
+# --- HELPER: Truncate to Telegram limit ---
+
+def safe_truncate(text: str, max_len: int = TELEGRAM_MAX_MESSAGE_LENGTH) -> str:
+    if len(text) <= max_len:
+        return text
+    truncated = text[:max_len - 30]
+    # Try to cut at last newline for cleaner output
+    last_nl = truncated.rfind('\n')
+    if last_nl > max_len // 2:
+        truncated = truncated[:last_nl]
+    return truncated + "\n\n<i>... truncated</i>"
+
+
+# --- KEYBOARD BUILDERS ---
+
+def build_dashboard_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("Equity", callback_data="equity:all"),
+            InlineKeyboardButton("Alerts", callback_data="alerts"),
+        ],
+        [
+            InlineKeyboardButton("Trades", callback_data="trades:all"),
+            InlineKeyboardButton("History", callback_data="history:all"),
+        ],
+    ])
+
+
+def build_section_keyboard(prefix: str, include_all: bool = True) -> InlineKeyboardMarkup:
+    """Build keyboard with per-account filter buttons + Refresh + Back."""
+    account_buttons = []
+    row = []
+    for acc in STATS_ACCOUNTS:
+        aid = acc['account_id']
+        row.append(InlineKeyboardButton(aid, callback_data=f"{prefix}:{aid}"))
+        if len(row) == 3:
+            account_buttons.append(row)
+            row = []
+    if row:
+        account_buttons.append(row)
+
+    bottom_row = []
+    if include_all:
+        bottom_row.append(InlineKeyboardButton("All Accounts", callback_data=f"{prefix}:all"))
+    bottom_row.append(InlineKeyboardButton("Refresh", callback_data=f"{prefix}:all" if include_all else prefix))
+    bottom_row.append(InlineKeyboardButton("<< Dashboard", callback_data="dash"))
+
+    account_buttons.append(bottom_row)
+    return InlineKeyboardMarkup(account_buttons)
+
+
+def build_back_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("<< Dashboard", callback_data="dash")]
+    ])
 
 
 # --- STATISTICS LOGIC (Global and Pair-Agnostic) ---
@@ -250,7 +296,7 @@ async def get_all_open_positions_stats(adapter: ExchangeAdapter, account_id: str
         return f"Error fetching position stats for {account_id}: {e}"
 
 
-# --- STATISTICS LOGIC (Pair-Specific for UI Buttons) ---
+# --- STATISTICS LOGIC (Pair-Specific) ---
 
 async def get_pair_market_info(adapter: ExchangeAdapter, account_id: str, pair: str) -> str:
     """Fetches real-time market data for a specific pair."""
@@ -343,10 +389,158 @@ async def get_last_position_for_pair(adapter: ExchangeAdapter, account_id: str, 
         return f"Error fetching stats for {account_id} on <code>{pair}</code>: {e}"
 
 
-# --- TELEGRAM COMMAND HANDLERS ---
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text("Stats Bot online. Select a token or use a command below:",
-                                    reply_markup=KEYBOARD_MARKUP)
+# --- RENDER FUNCTIONS (return text + keyboard) ---
+
+def render_dashboard() -> Tuple[str, InlineKeyboardMarkup]:
+    account_list = ", ".join(
+        f"{acc['account_id']} ({acc.get('exchange', 'mexc').upper()})" for acc in STATS_ACCOUNTS
+    )
+    if not account_list:
+        account_list = "None configured"
+
+    text = (
+        "<b>Dashboard</b>\n\n"
+        f"<b>Accounts:</b> {account_list}\n\n"
+        "Select a section below:"
+    )
+    return text, build_dashboard_keyboard()
+
+
+async def render_equity(target: str) -> Tuple[str, InlineKeyboardMarkup]:
+    if not API_CLIENTS:
+        return "No API clients configured.", build_back_keyboard()
+
+    if target == "all":
+        accounts = STATS_ACCOUNTS
+    else:
+        accounts = [acc for acc in STATS_ACCOUNTS if acc['account_id'] == target]
+        if not accounts:
+            return f"Account <code>{target}</code> not found.", build_back_keyboard()
+
+    tasks = []
+    for acc in accounts:
+        adapter = API_CLIENTS[acc['account_id']]
+        tasks.append(get_account_stats(adapter, acc['account_id']))
+        tasks.append(get_last_position_stats(adapter, acc['account_id']))
+
+    results = await asyncio.gather(*tasks)
+
+    combined = "\n".join(r.strip() for r in results if r.strip())
+    text = f"<b>Equity Overview</b>\n\n{combined}" if combined else "<b>Equity Overview</b>\n\nNo data available."
+    return text, build_section_keyboard("equity")
+
+
+async def render_alerts() -> Tuple[str, InlineKeyboardMarkup]:
+    if not API_CLIENTS:
+        return "No API clients configured.", build_back_keyboard()
+
+    lines = ["<b>Alerts</b>\n"]
+
+    for acc in STATS_ACCOUNTS:
+        aid = acc['account_id']
+        adapter = API_CLIENTS[aid]
+        exchange = adapter.exchange_name
+
+        # API health check
+        assets = await adapter.get_assets()
+        if assets is None:
+            lines.append(f"<b>{aid} ({exchange}):</b> API connection failed / token expired")
+        else:
+            lines.append(f"<b>{aid} ({exchange}):</b> API OK")
+
+        # Unfilled limit orders
+        pending = await adapter.get_pending_limit_orders()
+        if pending:
+            lines.append(f"  Unfilled limit orders: <code>{len(pending)}</code>")
+            for order in pending[:5]:  # Show max 5
+                lines.append(f"    - {order.symbol} @ <code>{order.price}</code>")
+            if len(pending) > 5:
+                lines.append(f"    <i>... and {len(pending) - 5} more</i>")
+        else:
+            lines.append("  No unfilled limit orders")
+
+        lines.append("")
+
+    text = "\n".join(lines)
+    kb = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("Refresh", callback_data="alerts"),
+            InlineKeyboardButton("<< Dashboard", callback_data="dash"),
+        ]
+    ])
+    return text, kb
+
+
+async def render_trades(target: str) -> Tuple[str, InlineKeyboardMarkup]:
+    if not API_CLIENTS:
+        return "No API clients configured.", build_back_keyboard()
+
+    if target == "all":
+        accounts = STATS_ACCOUNTS
+    else:
+        accounts = [acc for acc in STATS_ACCOUNTS if acc['account_id'] == target]
+        if not accounts:
+            return f"Account <code>{target}</code> not found.", build_back_keyboard()
+
+    tasks = [
+        get_all_open_positions_stats(API_CLIENTS[acc['account_id']], acc['account_id'])
+        for acc in accounts
+    ]
+    results = await asyncio.gather(*tasks)
+
+    open_msgs = [msg for msg in results if msg.strip()]
+    if not open_msgs:
+        text = "<b>Open Positions</b>\n\nNo open positions found."
+    else:
+        combined = "\n".join(m.strip() for m in open_msgs)
+        text = f"<b>Open Positions</b>\n\n{combined}"
+
+    return text, build_section_keyboard("trades")
+
+
+async def render_history(target: str) -> Tuple[str, InlineKeyboardMarkup]:
+    if not API_CLIENTS:
+        return "No API clients configured.", build_back_keyboard()
+
+    if target == "all":
+        accounts = STATS_ACCOUNTS
+    else:
+        accounts = [acc for acc in STATS_ACCOUNTS if acc['account_id'] == target]
+        if not accounts:
+            return f"Account <code>{target}</code> not found.", build_back_keyboard()
+
+    lines = ["<b>Recent Closed Trades</b>\n"]
+
+    for acc in accounts:
+        aid = acc['account_id']
+        adapter = API_CLIENTS[aid]
+        exchange = adapter.exchange_name
+
+        history = await adapter.get_historical_positions(page_size=10)
+        if not history:
+            lines.append(f"<b>{aid} ({exchange}):</b> No recent trades\n")
+            continue
+
+        lines.append(f"<b>--- {aid} ({exchange}) ---</b>")
+        for pos in history:
+            pnl = pos.realised
+            pnl_icon = "+" if pnl >= 0 else ""
+            close_time = datetime.fromtimestamp(pos.updateTime).strftime('%m-%d %H:%M')
+            lines.append(
+                f"  <code>{close_time}</code> {pos.symbol} {pos.positionType} "
+                f"<code>{pnl_icon}{pnl:.2f}</code>"
+            )
+        lines.append("")
+
+    text = "\n".join(lines)
+    return text, build_section_keyboard("history")
+
+
+# --- TELEGRAM HANDLERS ---
+
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    text, keyboard = render_dashboard()
+    await update.message.reply_text(text, reply_markup=keyboard)
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -354,132 +548,72 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not account_list:
         account_list = "- No accounts configured (Check STATS_BOTx in .env)"
 
-    help_text = f"""<b>Commands:</b>
-Click a **TOKEN BUTTON** to get its market price and your last position on that pair.
-<code>/stats</code> - Gets account PNL and the very last open/closed position across all pairs for all configured accounts (Global Stats).
-<code>/positions</code> - Shows details of ALL currently open positions across all configured accounts.
-<code>/token [PAIR]</code> - Manually request stats for a pair (e.g., /token ETH_USDT).
+    help_text = f"""<b>Stats Bot Help</b>
+
+<code>/start</code> or <code>/dash</code> - Open the dashboard
+<code>/help</code> - Show this help message
+
+Use the inline buttons to navigate between sections:
+<b>Equity</b> - Account balance + PNL breakdown
+<b>Alerts</b> - API health + unfilled limit orders
+<b>Trades</b> - All currently open positions
+<b>History</b> - Recent closed trades
 
 <b>Configured Accounts:</b>
 {account_list}
 """
-    await update.message.reply_text(help_text, reply_markup=KEYBOARD_MARKUP)
+    await update.message.reply_text(help_text)
 
 
-async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not API_CLIENTS:
-        await update.message.reply_text("Error: No API clients configured. Check STATS_BOTx in your .env file.",
-                                        reply_markup=KEYBOARD_MARKUP)
+async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+
+    data = query.data
+    if not data:
         return
 
-    await update.message.reply_text("Fetching GLOBAL stats for all configured accounts...",
-                                    reply_markup=KEYBOARD_MARKUP)
+    # Show loading state
+    try:
+        await query.edit_message_text("Loading...")
+    except Exception:
+        pass
 
-    stats_tasks = []
-    for account in STATS_ACCOUNTS:
-        adapter = API_CLIENTS[account['account_id']]
-        stats_tasks.append(get_account_stats(adapter, account['account_id']))
-        stats_tasks.append(get_last_position_stats(adapter, account['account_id']))
+    # Route callback data to render functions
+    try:
+        if data == "dash":
+            text, keyboard = render_dashboard()
 
-    results = await asyncio.gather(*stats_tasks)
+        elif data.startswith("equity:"):
+            target = data.split(":", 1)[1]
+            text, keyboard = await render_equity(target)
 
-    combined_message = "\n\n".join(results)
-    await update.message.reply_text(f"<b>Overall Account Statistics:</b>\n{combined_message}",
-                                    reply_markup=KEYBOARD_MARKUP)
+        elif data == "alerts":
+            text, keyboard = await render_alerts()
 
+        elif data.startswith("trades:"):
+            target = data.split(":", 1)[1]
+            text, keyboard = await render_trades(target)
 
-async def positions_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not API_CLIENTS:
-        await update.message.reply_text("Error: No API clients configured. Check STATS_BOTx in your .env file.",
-                                        reply_markup=KEYBOARD_MARKUP)
-        return
+        elif data.startswith("history:"):
+            target = data.split(":", 1)[1]
+            text, keyboard = await render_history(target)
 
-    await update.message.reply_text("Fetching ALL OPEN positions for all configured accounts...",
-                                    reply_markup=KEYBOARD_MARKUP)
-
-    position_tasks = []
-    for account in STATS_ACCOUNTS:
-        adapter = API_CLIENTS[account['account_id']]
-        position_tasks.append(get_all_open_positions_stats(adapter, account['account_id']))
-
-    results = await asyncio.gather(*position_tasks)
-
-    open_positions_messages = [msg for msg in results if msg.strip()]
-
-    if not open_positions_messages:
-        await update.message.reply_text("No open positions found across all configured accounts.",
-                                        reply_markup=KEYBOARD_MARKUP)
-    else:
-        combined_message = "\n\n".join(open_positions_messages)
-        await update.message.reply_text(f"<b>Open Positions Summary:</b>\n{combined_message}",
-                                        reply_markup=KEYBOARD_MARKUP)
-
-
-async def token_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles token button presses and manual /token commands."""
-
-    # Check if the command was triggered by the /token command or the text handler
-    if update.message.text.startswith('/'):
-        # Triggered by /token
-        if context.args:
-            pair = context.args[0].upper()
         else:
-            await update.message.reply_text("Please specify a token (e.g., BTC_USDT) or press a button.",
-                                            reply_markup=KEYBOARD_MARKUP)
-            return
-    else:
-        # Triggered by plain text (button press)
-        pair = update.message.text.strip().upper()
+            text, keyboard = render_dashboard()
 
-    if not pair or '_' not in pair:
-        await update.message.reply_text(
-            f"Invalid pair format: <code>{pair}</code>. Please use the format TOKEN_QUOTE (e.g., BTC_USDT).",
-            reply_markup=KEYBOARD_MARKUP)
-        return
+        text = safe_truncate(text)
+        await query.edit_message_text(text, reply_markup=keyboard)
 
-    await update.message.reply_text(f"Fetching focused stats for <code>{pair}</code> across all accounts...",
-                                    reply_markup=KEYBOARD_MARKUP)
-
-    tasks = []
-    for account in STATS_ACCOUNTS:
-        adapter = API_CLIENTS[account['account_id']]
-        account_id = account['account_id']
-
-        # Add tasks to fetch market info and last position for the specific pair
-        tasks.append(get_pair_market_info(adapter, account_id, pair))
-        tasks.append(get_last_position_for_pair(adapter, account_id, pair))
-
-    results = await asyncio.gather(*tasks)
-
-    # Filter out redundant info messages from separate fetches
-    results = [r for r in results if r]
-
-    combined_message = "\n\n".join(results)
-
-    await update.message.reply_text(f"<b>Token Stats Summary:</b>\n{combined_message}", reply_markup=KEYBOARD_MARKUP)
-
-
-async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles text input that isn't a command, primarily from Reply Keyboard buttons."""
-    text = update.message.text.strip()
-
-    # A simple check to see if the text is a pair (TOKEN_QUOTE)
-    # Allows numbers and letters, but requires an underscore
-    if '_' in text and text.replace('_', '').isalnum():
-        # User pressed a token button, redirect to the token_stats_command
-        # We don't use context.args here; we pass the text directly.
-        await token_stats_command(update, context)
-    else:
-        # Ignore other non-command text
-        await update.message.reply_text("Please use a command or select a token from the menu below.",
-                                        reply_markup=KEYBOARD_MARKUP)
-
-
-async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    help_text = """<b>Available Commands:</b>
-<code>/stats</code>, <code>/positions</code>, <code>/help</code>, <code>/token</code>
-"""
-    await update.message.reply_text(f"Unknown command.\n\n{help_text}", reply_markup=KEYBOARD_MARKUP)
+    except Exception as e:
+        logger.error(f"Error handling callback '{data}': {e}")
+        try:
+            await query.edit_message_text(
+                f"An error occurred: <code>{e}</code>",
+                reply_markup=build_back_keyboard()
+            )
+        except Exception:
+            pass
 
 
 # --- BOT STARTUP ---
@@ -487,19 +621,16 @@ def main() -> None:
     defaults = Defaults(parse_mode=ParseMode.HTML)
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).defaults(defaults).build()
 
-    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("dash", start_command))
     application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("stats", stats_command))
-    application.add_handler(CommandHandler("positions", positions_command))
-    application.add_handler(CommandHandler("token", token_stats_command))
-    application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), text_handler))
-    application.add_handler(MessageHandler(filters.COMMAND, unknown_command))
+    application.add_handler(CallbackQueryHandler(callback_query_handler))
 
     exchange_summary = ", ".join(
         f"{acc['account_id']}({acc.get('exchange', 'mexc').upper()})" for acc in STATS_ACCOUNTS
     )
     print(f"Loaded {len(API_CLIENTS)} exchange adapter(s): {exchange_summary}")
-    print("Telegram Stats bot is running with default HTML parse mode.")
+    print("Telegram Stats bot is running with inline dashboard UI.")
     application.run_polling()
 
 

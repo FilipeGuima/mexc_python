@@ -84,6 +84,11 @@ class ExchangeAdapter(ABC):
         ...
 
     @abstractmethod
+    async def get_pending_limit_orders(self) -> Optional[List[StatsOrderInfo]]:
+        """Get unfilled limit orders (not TP/SL trigger orders)."""
+        ...
+
+    @abstractmethod
     async def get_ticker(self, symbol: str) -> Optional[StatsTickerInfo]:
         ...
 
@@ -206,6 +211,24 @@ class MexcAdapter(ExchangeAdapter):
             for o in data
             if o.orderType == OrderType.PriceLimited
         ]
+
+    async def get_pending_limit_orders(self) -> Optional[List[StatsOrderInfo]]:
+        data = await self._safe_call("get_current_pending_orders")
+        if not data:
+            return None
+        from mexcpy.mexcTypes import OrderCategory
+        results = [
+            StatsOrderInfo(
+                orderId=str(o.orderId),
+                positionId=str(o.positionId),
+                symbol=o.symbol,
+                orderType="LIMIT",
+                price=o.price,
+            )
+            for o in data
+            if o.category == OrderCategory.LimitOrder
+        ]
+        return results if results else None
 
     async def get_ticker(self, symbol: str) -> Optional[StatsTickerInfo]:
         data = await self._safe_call("get_ticker", symbol)
@@ -362,6 +385,26 @@ class BlofinAdapter(ExchangeAdapter):
             return results if results else None
         except Exception as e:
             logger.error(f"Blofin get_pending_tp_orders error: {e}")
+            return None
+
+    async def get_pending_limit_orders(self) -> Optional[List[StatsOrderInfo]]:
+        try:
+            orders = await self._api.get_pending_orders()
+            if not orders:
+                return None
+            results = [
+                StatsOrderInfo(
+                    orderId=o.get("orderId", ""),
+                    positionId=o.get("positionId", ""),
+                    symbol=self.to_display_symbol(o.get("instId", "")),
+                    orderType="LIMIT",
+                    price=float(o.get("price", 0)),
+                )
+                for o in orders
+            ]
+            return results if results else None
+        except Exception as e:
+            logger.error(f"Blofin get_pending_limit_orders error: {e}")
             return None
 
     async def get_ticker(self, symbol: str) -> Optional[StatsTickerInfo]:

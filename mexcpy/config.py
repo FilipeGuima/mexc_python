@@ -21,6 +21,7 @@ MEXC_TESTNET = os.getenv("MEXC_TESTNET", "true").lower() in ("true", "1", "yes")
 BLOFIN_TESTNET = os.getenv("BLOFIN_TESTNET", "true").lower() in ("true", "1", "yes")
 
 TP1_TOKEN = os.getenv("TP1_MEXC_TOKEN", MEXC_TOKEN)
+TP3_TOKEN = os.getenv("TP3_MEXC_TOKEN", MEXC_TOKEN)
 BREAKEVEN_TOKEN = os.getenv("BREAKEVEN_MEXC_TOKEN", MEXC_TOKEN)
 USER_LISTENER_TOKEN = os.getenv("USER_LISTENER_MEXC_TOKEN", MEXC_TOKEN)
 
