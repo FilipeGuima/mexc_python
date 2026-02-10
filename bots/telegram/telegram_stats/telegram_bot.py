@@ -15,6 +15,8 @@ from bots.telegram.telegram_stats.exchange_adapter import (
 from mexcpy.config import TELEGRAM_BOT_TOKEN, STATS_ACCOUNTS
 
 # --- CONFIGURATION CHECKS ---
+from common.logger import setup_logging
+
 if not TELEGRAM_BOT_TOKEN:
     print(" ERROR: TELEGRAM_BOT_TOKEN not found in .env via mexcpy.config")
     exit(1)
@@ -23,10 +25,7 @@ if not STATS_ACCOUNTS:
     print(" WARNING: No STATS_BOTx accounts defined in .env. Stats functionality will be limited.")
 
 # --- SETUP ---
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
-)
-logger = logging.getLogger(__name__)
+logger = setup_logging("TelegramStatsBot")
 
 # Initialize a dictionary of adapters (one for each configured bot)
 API_CLIENTS: Dict[str, ExchangeAdapter] = {
@@ -629,8 +628,8 @@ def main() -> None:
     exchange_summary = ", ".join(
         f"{acc['account_id']}({acc.get('exchange', 'mexc').upper()})" for acc in STATS_ACCOUNTS
     )
-    print(f"Loaded {len(API_CLIENTS)} exchange adapter(s): {exchange_summary}")
-    print("Telegram Stats bot is running with inline dashboard UI.")
+    logger.info(f"Loaded {len(API_CLIENTS)} exchange adapter(s): {exchange_summary}")
+    logger.info("Telegram Stats bot is running with inline dashboard UI.")
     application.run_polling()
 
 

@@ -5,9 +5,12 @@ Blofin Breakeven Strategy (TP1)
 - Supports UPDATE signals (change TP/SL)
 """
 
+import logging
 from typing import Optional
 from bots.blofin.strategies.interface.strategy_interface import BlofinStrategy
 from common.utils import adjust_price_to_step
+
+logger = logging.getLogger("BlofinBreakevenStrategy")
 
 
 class BreakevenStrategy(BlofinStrategy):
@@ -50,12 +53,12 @@ class BreakevenStrategy(BlofinStrategy):
                     parts.append(f"TP: {tp_price}")
                 if sl_price:
                     parts.append(f"SL: {sl_price}")
-                print(f"   Set: {', '.join(parts)}")
+                logger.info(f"   Set: {', '.join(parts)}")
             else:
                 error = res.get('msg', 'Failed') if res else 'No response'
-                print(f"   TPSL Failed: {error}")
+                logger.info(f"   TPSL Failed: {error}")
 
-        print(f"{'='*40}")
+        logger.info(f"{'='*40}")
 
         # Add to active positions
         engine.active_positions[symbol] = {
@@ -124,7 +127,7 @@ class BreakevenStrategy(BlofinStrategy):
         final_sl_price = entry_price
         exit_side = "sell" if position_side == "long" else "buy"
 
-        print(f"   > Found Position: {position_side.upper()} @ {entry_price}. Moving SL...")
+        logger.info(f"   > Found Position: {position_side.upper()} @ {entry_price}. Moving SL...")
 
         req_body = {
             "instId": formatted_symbol,

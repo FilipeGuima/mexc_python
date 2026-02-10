@@ -15,6 +15,7 @@ from bots.common.listener_interface import ListenerInterface
 from bots.blofin.strategies.interface.strategy_interface import BlofinStrategy
 from common.parser import parse_signal, UpdateParser
 from common.utils import adjust_price_to_step, validate_signal_tp_sl
+from common.logger import setup_logging
 
 
 class BlofinBotEngine:
@@ -36,14 +37,11 @@ class BlofinBotEngine:
 
     def run(self):
         """Wire everything together and start the bot."""
-        logging.basicConfig(
-            format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-            level=logging.INFO
-        )
+        setup_logging(self.strategy.name)
 
         # Check credentials
         if not self.api.api_key or not self.api.secret_key or not self.api.passphrase:
-            print("CRITICAL ERROR: Blofin credentials (API_KEY, SECRET, PASSPHRASE) are missing")
+            self.logger.critical("Blofin credentials (API_KEY, SECRET, PASSPHRASE) are missing")
             return
 
         # Wire listener callback
@@ -69,16 +67,14 @@ class BlofinBotEngine:
         loop = asyncio.get_event_loop()
         loop.run_until_complete(self._startup())
 
-        print("Waiting for signals... (Ctrl+C to stop)\n")
+        self.logger.info("Waiting for signals... (Ctrl+C to stop)")
 
         try:
             self.listener.run_forever()
         except KeyboardInterrupt:
-            print("\nBot stopped by user.")
+            self.logger.info("Bot stopped by user.")
         except Exception as e:
-            print(f"\nCRITICAL ERROR: {e}")
-            import traceback
-            traceback.print_exc()
+            self.logger.critical(f"CRITICAL ERROR: {e}", exc_info=True)
 
     async def _startup(self):
         """Initialize on startup: load positions, start monitor."""
@@ -96,41 +92,41 @@ class BlofinBotEngine:
 
         # Route 1: New Trade Signals (PAIR + SIDE)
         if "PAIR" in text_upper and "SIDE" in text_upper:
-            print(f"\n--- New Signal Detected ({datetime.now().strftime('%H:%M:%S')}) ---")
+            self.logger.info(f"New Signal Detected ({datetime.now().strftime('%H:%M:%S')})")
 
             signal_data = parse_signal(text)
             if not signal_data:
-                print(" Failed to parse signal.")
+                self.logger.warning("Failed to parse signal.")
                 return
 
             symbol = signal_data['symbol']
 
             if signal_data['type'] == 'BREAKEVEN':
-                print(f"  Processing BREAKEVEN for {symbol}...")
+                self.logger.info(f"Processing BREAKEVEN for {symbol}...")
                 res = await self.strategy.on_breakeven_signal(symbol, self)
                 if res:
-                    print(res)
+                    self.logger.info(res)
                 else:
-                    print(f"  BREAKEVEN not supported by {self.strategy.name}")
+                    self.logger.info(f"BREAKEVEN not supported by {self.strategy.name}")
 
             elif signal_data['type'] == 'TRADE':
-                print(f"  Processing TRADE for {symbol}...")
+                self.logger.info(f"Processing TRADE for {symbol}...")
                 res = await self.execute_signal_trade(signal_data)
-                print(res)
+                self.logger.info(res)
 
             return
 
         # Route 2: Update Signals (change TP/SL)
         if self.strategy.supports_updates:
             if any(k in text_upper for k in ["CHANGE", "ADJUST", "MOVE", "SET"]) and "/" in text:
-                print(f"\n--- Update Signal Detected ({datetime.now().strftime('%H:%M:%S')}) ---")
+                self.logger.info(f"Update Signal Detected ({datetime.now().strftime('%H:%M:%S')})")
 
                 update_data = UpdateParser.parse(text)
                 if update_data:
                     result = await self.execute_update_signal(update_data)
-                    print(result)
+                    self.logger.info(result)
                 else:
-                    print(" Update detected but failed to parse details.")
+                    self.logger.warning("Update detected but failed to parse details.")
 
     # ===================================================================
     # TRADE EXECUTION
@@ -513,7 +509,7 @@ class BlofinBotEngine:
         update_type = data['type']
         new_price_raw = data['price']
 
-        print(f"  PROCESSING UPDATE: {formatted_symbol} {update_type} -> {new_price_raw}")
+        self.logger.info(f"PROCESSING UPDATE: {formatted_symbol} {update_type} -> {new_price_raw}")
 
         # Get instrument info for price precision
         inst_info = await self.api.get_instrument_info(formatted_symbol)
@@ -522,7 +518,7 @@ class BlofinBotEngine:
 
         # Get existing TPSL orders
         tpsl_orders = await self.api.get_tpsl_orders(formatted_symbol)
-        print(f" DEBUG: Found {len(tpsl_orders)} active TPSL orders for {formatted_symbol}")
+        self.logger.debug(f"Found {len(tpsl_orders)} active TPSL orders for {formatted_symbol}")
 
         # Try to get position info
         position_side = None
@@ -570,7 +566,7 @@ class BlofinBotEngine:
             tp_trigger = order.get('tpTriggerPrice')
             sl_trigger = order.get('slTriggerPrice')
 
-            print(f"    - ID={tpsl_id} | Type={order_type} | TP={tp_trigger} | SL={sl_trigger}")
+            self.logger.debug(f"  TPSL: ID={tpsl_id} | Type={order_type} | TP={tp_trigger} | SL={sl_trigger}")
 
             if update_type == 'SL' and (order_type in ['sl', 'tpsl'] or sl_trigger):
                 target_order = {
@@ -600,7 +596,7 @@ class BlofinBotEngine:
             if not position_side or not hold_vol:
                 return f"  Update Failed: Cannot determine position info for {formatted_symbol}"
 
-            print(f" No existing {update_type} order found. Creating new TPSL order...")
+            self.logger.info(f"No existing {update_type} order found. Creating new TPSL order...")
 
             close_side = "sell" if position_side == "long" else "buy"
             tpsl_body = {
@@ -630,7 +626,7 @@ class BlofinBotEngine:
                 return f"  FAILED to create {update_type}: {error_msg}"
 
         # Try to amend existing order
-        print(f" Amending TPSL Order {target_order['tpsl_id']}...")
+        self.logger.info(f"Amending TPSL Order {target_order['tpsl_id']}...")
 
         if update_type == 'SL':
             res = await self.api.amend_tpsl_order(
@@ -652,7 +648,7 @@ class BlofinBotEngine:
 
         # Amend failed - cancel and recreate
         error_msg = res.get('msg', 'Unknown') if res else 'No Response'
-        print(f"    Amend failed ({error_msg}), trying cancel & recreate...")
+        self.logger.warning(f"Amend failed ({error_msg}), trying cancel & recreate...")
 
         cancel_res = await self.api.cancel_tpsl_order(formatted_symbol, target_order['tpsl_id'])
         self.logger.info(f" Cancel TPSL Response: {cancel_res}")
@@ -797,9 +793,7 @@ class BlofinBotEngine:
                 await asyncio.sleep(5)
 
             except Exception as e:
-                self.logger.error(f"Monitor error: {e}")
-                import traceback
-                traceback.print_exc()
+                self.logger.error(f"Monitor error: {e}", exc_info=True)
                 await asyncio.sleep(10)
 
     # ===================================================================
@@ -813,15 +807,10 @@ class BlofinBotEngine:
         side = order_info['side']
 
         fill_msg = (
-            f"\n{'='*40}\n"
-            f"  **LIMIT ORDER FILLED!**\n"
-            f"   Symbol: {symbol}\n"
-            f"   Side: {side.upper()}\n"
-            f"   Entry: {fill_price}\n"
-            f"   Size: {filled_size}\n"
-            f"   Lev: x{order_info.get('leverage', 'N/A')}\n"
+            f"LIMIT ORDER FILLED! | Symbol: {symbol} | Side: {side.upper()} | "
+            f"Entry: {fill_price} | Size: {filled_size} | Lev: x{order_info.get('leverage', 'N/A')}"
         )
-        print(fill_msg)
+        self.logger.info(fill_msg)
 
         await self.strategy.on_order_fill(order_id, order_info, filled_size, fill_price, self)
 
@@ -832,15 +821,10 @@ class BlofinBotEngine:
         entry = order_info.get('entry_price', 'N/A')
 
         cancel_msg = (
-            f"\n{'='*40}\n"
-            f"  **ORDER CANCELLED**\n"
-            f"   Symbol: {symbol}\n"
-            f"   Side: {side.upper()}\n"
-            f"   Entry: {entry}\n"
-            f"   Order ID: {order_id}\n"
-            f"{'='*40}"
+            f"ORDER CANCELLED | Symbol: {symbol} | Side: {side.upper()} | "
+            f"Entry: {entry} | Order ID: {order_id}"
         )
-        print(cancel_msg)
+        self.logger.info(cancel_msg)
 
     async def _handle_position_closed(self, symbol: str, pos_info: dict):
         """Handle when a position is closed. Determine reason and notify strategy."""
@@ -876,16 +860,10 @@ class BlofinBotEngine:
             emoji = "?"
 
         close_msg = (
-            f"\n{'='*40}\n"
-            f" [{emoji}] **POSITION CLOSED** - {symbol}\n"
-            f"   Side: {side.upper()}\n"
-            f"   Entry: {entry_price}\n"
-            f"   Size: {size} @ {leverage}x\n"
-            f"   Reason: {reason_str}\n"
-            f"{'='*40}"
+            f"POSITION CLOSED [{emoji}] | Symbol: {symbol} | Side: {side.upper()} | "
+            f"Entry: {entry_price} | Size: {size} @ {leverage}x | Reason: {reason_str}"
         )
-        print(close_msg)
-        self.logger.info(f"Position closed: {symbol} - {reason_str}")
+        self.logger.info(close_msg)
 
     # ===================================================================
     # HELPER METHODS (used by strategies via engine param)
@@ -934,13 +912,13 @@ class BlofinBotEngine:
 
     async def load_existing_positions(self):
         """Load existing open positions on startup for monitoring."""
-        print("\nChecking for existing positions...")
+        self.logger.info("Checking for existing positions...")
 
         try:
             positions = await self.api.get_open_positions()
 
             if not positions:
-                print("  No existing positions found.\n")
+                self.logger.info("No existing positions found.")
                 return
 
             for pos in positions:
@@ -972,12 +950,9 @@ class BlofinBotEngine:
                 }
 
                 pnl_str = f"+{pos.unrealized:.2f}" if pos.unrealized >= 0 else f"{pos.unrealized:.2f}"
-                print(f"  Loaded: {symbol} | {side.upper()} | Entry: {pos.openAvgPrice} | PnL: {pnl_str}")
-                if tp_price or sl_price:
-                    print(f"    TP: {tp_price or 'None'} | SL: {sl_price or 'None'}")
+                self.logger.info(f"Loaded: {symbol} | {side.upper()} | Entry: {pos.openAvgPrice} | PnL: {pnl_str} | TP: {tp_price or 'None'} | SL: {sl_price or 'None'}")
 
-            print(f"\n  Total: {len(self.active_positions)} position(s) loaded for monitoring.\n")
+            self.logger.info(f"Total: {len(self.active_positions)} position(s) loaded for monitoring.")
 
         except Exception as e:
-            self.logger.error(f"Error loading existing positions: {e}")
-            print(f"  Warning: Could not load existing positions: {e}\n")
+            self.logger.error(f"Error loading existing positions: {e}", exc_info=True)

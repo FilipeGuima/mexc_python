@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from mexcpy.api import MexcFuturesAPI
 from bots.common.listener_interface import ListenerInterface
 from bots.mexc.strategies.strategy_interface import MexcStrategy
+from common.logger import setup_logging
 
 
 class MexcBotEngine:
@@ -27,10 +28,7 @@ class MexcBotEngine:
 
     def run(self):
         """Wire everything together and start the bot."""
-        logging.basicConfig(
-            format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-            level=logging.INFO
-        )
+        setup_logging(self.strategy.name)
 
         # Wire listener callback
         self.listener.register_callback(self._handle_message)
@@ -51,21 +49,19 @@ class MexcBotEngine:
         loop.run_until_complete(self._startup())
 
         testnet_status = "TRUE" if self.testnet else "FALSE"
-        print(f"\nTESTNET STATUS: {testnet_status}")
-        print("Waiting for signals... (Ctrl+C to stop)\n")
+        self.logger.info(f"TESTNET STATUS: {testnet_status}")
+        self.logger.info("Waiting for signals... (Ctrl+C to stop)")
 
         try:
             self.listener.run_forever()
         except KeyboardInterrupt:
-            print("\nBot stopped by user.")
+            self.logger.info("Bot stopped by user.")
         except Exception as e:
-            print(f"\nCRITICAL ERROR: {e}")
-            import traceback
-            traceback.print_exc()
+            self.logger.critical(f"CRITICAL ERROR: {e}", exc_info=True)
 
     async def _startup(self):
         """Initialize on startup: check API, run strategy startup."""
-        print(" Checking MEXC API connection...")
+        self.logger.info("Checking MEXC API connection...")
 
         res = await self.api.get_user_assets()
         if res.success and res.data:
@@ -78,10 +74,10 @@ class MexcBotEngine:
             else:
                 available = [getattr(a, 'currency', 'unknown') for a in data]
                 bal = f"No USDT found (available: {available})"
-            print(f" API OK | Balance: {bal}")
+            self.logger.info(f"API OK | Balance: {bal}")
         else:
-            print(f" API FAILED: {res.message}")
-            print(" WARNING: Bot will start but trades may fail!")
+            self.logger.error(f"API FAILED: {res.message}")
+            self.logger.warning("Bot will start but trades may fail!")
 
         # Run strategy-specific startup
         await self.strategy.on_startup(self)
@@ -94,7 +90,7 @@ class MexcBotEngine:
         """Route incoming messages to strategy handler."""
         result = await self.strategy.handle_signal(text, self)
         if result:
-            print(result)
+            self.logger.info(result)
 
     # ===================================================================
     # SHARED HELPERS (used by strategies)
@@ -177,7 +173,7 @@ class MexcBotEngine:
         If is_limit_order=True, first waits for the limit order to fill.
         """
         if is_limit_order:
-            print(f" Waiting for limit order to fill for {symbol}...")
+            self.logger.info(f"Waiting for limit order to fill for {symbol}...")
             fill_wait_count = 0
             max_wait_cycles = 720  # ~1 hour at 5s intervals
 
@@ -188,7 +184,7 @@ class MexcBotEngine:
                 try:
                     pos_res = await self.api.get_open_positions(symbol)
                     if pos_res.success and pos_res.data:
-                        print(f" Limit order FILLED for {symbol}! Position now open.")
+                        self.logger.info(f"Limit order FILLED for {symbol}! Position now open.")
                         start_vol = pos_res.data[0].holdVol
                         break
 
@@ -197,18 +193,17 @@ class MexcBotEngine:
                     if orders_res.success:
                         has_pending = len(orders_res.data or []) > 0
                         if not has_pending:
-                            print(f" Limit order for {symbol} was CANCELLED or EXPIRED. Stopping monitor.")
+                            self.logger.info(f"Limit order for {symbol} was CANCELLED or EXPIRED. Stopping monitor.")
                             return
 
                 except Exception as e:
-                    print(f" Error checking limit order status: {e}")
+                    self.logger.error(f"Error checking limit order status: {e}")
 
             else:
-                print(f" Limit order for {symbol} did not fill within timeout. Stopping monitor.")
+                self.logger.info(f"Limit order for {symbol} did not fill within timeout. Stopping monitor.")
                 return
 
-        print(f" Auto-monitoring started for {symbol}...")
-        print("-" * 40)
+        self.logger.info(f"Auto-monitoring started for {symbol}...")
 
         last_vol = start_vol
         first_run = True
@@ -229,8 +224,8 @@ class MexcBotEngine:
                     await asyncio.sleep(2)
                     reason = await self.detect_close_reason(symbol, tp1_target)
 
-                    msg = f" **{symbol} Closed!**\nReason: {reason}"
-                    print(f"\n{msg}\n" + "-" * 40)
+                    msg = f"**{symbol} Closed!** Reason: {reason}"
+                    self.logger.info(msg)
 
                     # Clean up any remaining orders
                     await self.api.cancel_all_orders(symbol=symbol)

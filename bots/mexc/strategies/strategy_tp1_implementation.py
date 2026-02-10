@@ -20,7 +20,7 @@ logger = logging.getLogger("MexcTP1Strategy")
 
 
 class MexcTP1Strategy(MexcStrategy):
-    name = "MEXC TP1 BOT (Smart Entry)"
+    name = "MEXC TP1 BOT "
 
     def parse_signal(self, text: str) -> Optional[dict]:
         """Parse signal using common parser."""
@@ -32,7 +32,7 @@ class MexcTP1Strategy(MexcStrategy):
 
         # Trade signals
         if "PAIR" in text_upper and "SIDE" in text_upper:
-            print("\n  New Signal Detected!")
+            logger.info("\n  New Signal Detected!")
             signal_data = self.parse_signal(text)
 
             if not signal_data:
@@ -53,7 +53,7 @@ class MexcTP1Strategy(MexcStrategy):
 
         # Update signals
         if any(k in text_upper for k in ["CHANGE", "ADJUST", "MOVE", "SET"]) and "/" in text:
-            print("\n  Update Signal Detected!")
+            logger.info("\n  Update Signal Detected!")
             update_data = UpdateParser.parse(text)
 
             if update_data:
@@ -138,7 +138,7 @@ class MexcTP1Strategy(MexcStrategy):
         contract_size = contract_res.data.get('contractSize')
         price_step = contract_res.data.get('priceUnit')
 
-        print(f" DEBUG: {symbol} Tick Size: {price_step} | Current Price: {current_price}")
+        logger.debug(f"{symbol} Tick Size: {price_step} | Current Price: {current_price}")
 
         # === STEP 4: Calculate volume ===
         margin_amount = balance * (equity_perc / 100.0)
@@ -260,7 +260,7 @@ class MexcTP1Strategy(MexcStrategy):
         update_type = data['type']
         new_price_raw = data['price']
 
-        print(f"  PROCESSING UPDATE: {symbol} {update_type} -> {new_price_raw}")
+        logger.info(f"  PROCESSING UPDATE: {symbol} {update_type} -> {new_price_raw}")
 
         pos_res = await engine.api.get_open_positions(symbol)
         if not pos_res.success or not pos_res.data:
@@ -275,7 +275,7 @@ class MexcTP1Strategy(MexcStrategy):
         target_order = None
 
         if orders_res.success and orders_res.data:
-            print(f" DEBUG: Found {len(orders_res.data)} active stop-limit orders.")
+            logger.debug(f"Found {len(orders_res.data)} active stop-limit orders.")
 
             for order in orders_res.data:
                 is_dict = isinstance(order, dict)
@@ -289,7 +289,7 @@ class MexcTP1Strategy(MexcStrategy):
                 curr_sl = order.get('stopLossPrice') if is_dict else getattr(order, 'stopLossPrice', None)
                 curr_tp = order.get('takeProfitPrice') if is_dict else getattr(order, 'takeProfitPrice', None)
 
-                print(f"    - ID={plan_id or order_id} | Side={side_val} | SL={curr_sl} | TP={curr_tp}")
+                logger.debug(f"  Order ID={plan_id or order_id} | Side={side_val} | SL={curr_sl} | TP={curr_tp}")
 
                 # SELECTION LOGIC:
                 # Side 0 = Position Plan Order (contains both TP and SL) - MOST COMMON
@@ -300,7 +300,7 @@ class MexcTP1Strategy(MexcStrategy):
 
                 if side_val == 0:
                     match_found = True
-                    print("      -> Selected (Position TP/SL Plan)")
+                    logger.debug("Selected (Position TP/SL Plan)")
                 elif update_type == 'SL' and side_val == 2:
                     match_found = True
                 elif 'TP' in update_type and side_val == 1:
@@ -316,7 +316,7 @@ class MexcTP1Strategy(MexcStrategy):
                     }
                     break
         else:
-            print(f" 🔎 DEBUG: No active stop-limit orders found.")
+            logger.debug("No active stop-limit orders found.")
 
         if not target_order:
             return f"  Update Skipped: No existing {update_type} order found to modify."
@@ -331,18 +331,18 @@ class MexcTP1Strategy(MexcStrategy):
             new_sl = target_order['curr_sl']
             new_tp = final_price
 
-        print(f" Modifying Order {order_id_to_use}: SL={new_sl}, TP={new_tp}")
+        logger.info(f" Modifying Order {order_id_to_use}: SL={new_sl}, TP={new_tp}")
 
         try:
             if use_plan_api:
-                print(f"    Using: update_stop_limit_trigger_plan_price (Plan Order)")
+                logger.info(f"    Using: update_stop_limit_trigger_plan_price (Plan Order)")
                 res = await engine.api.update_stop_limit_trigger_plan_price(
                     stop_plan_order_id=order_id_to_use,
                     stop_loss_price=new_sl,
                     take_profit_price=new_tp
                 )
             else:
-                print(f"    Using: change_stop_limit_trigger_price (Regular Order)")
+                logger.info(f"    Using: change_stop_limit_trigger_price (Regular Order)")
                 res = await engine.api.change_stop_limit_trigger_price(
                     order_id=order_id_to_use,
                     stop_loss_price=new_sl,
@@ -353,7 +353,7 @@ class MexcTP1Strategy(MexcStrategy):
                 return f" SUCCESS: {symbol} {update_type} updated to {final_price}"
             else:
                 if use_plan_api:
-                    print(f"    Plan API failed ({res.message}), trying regular API...")
+                    logger.warning(f"Plan API failed ({res.message}), trying regular API...")
                     res = await engine.api.change_stop_limit_trigger_price(
                         order_id=order_id_to_use,
                         stop_loss_price=new_sl,
@@ -365,8 +365,7 @@ class MexcTP1Strategy(MexcStrategy):
                 return f"  MODIFICATION FAILED: {res.message}"
 
         except Exception as e:
-            import traceback
-            traceback.print_exc()
+            logger.error(f"Error calling modification API: {e}", exc_info=True)
             return f"  Error calling modification API: {e}"
 
     @property

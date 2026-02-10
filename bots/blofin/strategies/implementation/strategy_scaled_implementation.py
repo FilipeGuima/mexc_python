@@ -118,12 +118,12 @@ class ScaledStrategy(BlofinStrategy):
         symbol = order_info['symbol']
         side = order_info['side']
 
-        print(f"\n{'='*40}")
-        print(f"  **ORDER FILLED** - {symbol}")
-        print(f"   Side: {side.upper()}")
-        print(f"   Entry: {fill_price}")
-        print(f"   Size: {filled_size}")
-        print(f"   Leverage: x{order_info.get('leverage', 'N/A')}")
+        logger.info(f"\n{'='*40}")
+        logger.info(f"  **ORDER FILLED** - {symbol}")
+        logger.info(f"   Side: {side.upper()}")
+        logger.info(f"   Entry: {fill_price}")
+        logger.info(f"   Size: {filled_size}")
+        logger.info(f"   Leverage: x{order_info.get('leverage', 'N/A')}")
 
         # Create scaled position tracker
         pos = ScaledPosition(
@@ -141,8 +141,8 @@ class ScaledStrategy(BlofinStrategy):
 
         # Set up initial TPSL orders
         tpsl_result = await self._setup_scaled_tpsl(pos, engine)
-        print(f"   TPSL: {tpsl_result}")
-        print(f"{'='*40}")
+        logger.info(f"   TPSL: {tpsl_result}")
+        logger.info(f"{'='*40}")
 
         # Add to tracking
         self.scaled_positions[symbol] = pos
@@ -218,7 +218,7 @@ class ScaledStrategy(BlofinStrategy):
                 elif reason == CloseReason.TP:
                     await self._handle_tp3_hit(pos)
                 else:
-                    print(f"\n Position closed for {symbol} (manual or unknown)")
+                    logger.info(f"\n Position closed for {symbol} (manual or unknown)")
 
                 positions_to_remove.append(symbol)
 
@@ -274,7 +274,7 @@ class ScaledStrategy(BlofinStrategy):
                 logger.error(f"Failed to restore {symbol}: {e}")
 
         if self.scaled_positions:
-            print(f" Restored {len(self.scaled_positions)} scaled position(s)")
+            logger.info(f" Restored {len(self.scaled_positions)} scaled position(s)")
             for sym, pos in self.scaled_positions.items():
                 status = []
                 if pos.tp1_hit:
@@ -282,7 +282,7 @@ class ScaledStrategy(BlofinStrategy):
                 if pos.tp2_hit:
                     status.append("TP2 hit")
                 status_str = ", ".join(status) if status else "Pending"
-                print(f"   {sym}: {status_str}")
+                logger.info(f"   {sym}: {status_str}")
 
     # ===================================================================
     # INTERNAL HELPERS
@@ -377,10 +377,10 @@ class ScaledStrategy(BlofinStrategy):
         lot_size = await self._get_lot_size(pos.symbol, engine)
         pos.remaining_size = self._round_size_to_lot(pos.original_size * 0.50, lot_size)
 
-        print(f"\n{'='*40}")
-        print(f" **TP1 HIT** - {pos.symbol}")
-        print(f"   Closed: 50% @ {pos.tp1_price}")
-        print(f"   Remaining: {pos.remaining_size}")
+        logger.info(f"\n{'='*40}")
+        logger.info(f" **TP1 HIT** - {pos.symbol}")
+        logger.info(f"   Closed: 50% @ {pos.tp1_price}")
+        logger.info(f"   Remaining: {pos.remaining_size}")
 
         # Cancel old SL and create new one with 50% size
         if pos.sl_order_id:
@@ -396,7 +396,7 @@ class ScaledStrategy(BlofinStrategy):
                 pos.sl_order_id = data[0].get('tpslId')
             elif isinstance(data, dict):
                 pos.sl_order_id = data.get('tpslId')
-            print(f"   SL updated to 50% size")
+            logger.info(f"   SL updated to 50% size")
 
         # Create TP2 order (50% of remaining = 25% of original)
         tp2_size = self._round_size_to_lot(pos.remaining_size * 0.50, lot_size)
@@ -411,11 +411,11 @@ class ScaledStrategy(BlofinStrategy):
                     pos.tp2_order_id = data[0].get('tpslId')
                 elif isinstance(data, dict):
                     pos.tp2_order_id = data.get('tpslId')
-                print(f"   TP2 set: {pos.tp2_price} (25% of original)")
+                logger.info(f"   TP2 set: {pos.tp2_price} (25% of original)")
             else:
-                print(f"   TP2 failed: {tp2_res.get('msg', 'Unknown') if tp2_res else 'No response'}")
+                logger.info(f"   TP2 failed: {tp2_res.get('msg', 'Unknown') if tp2_res else 'No response'}")
 
-        print(f"{'='*40}")
+        logger.info(f"{'='*40}")
         self._save_positions()
 
     async def _handle_tp2_hit(self, pos: ScaledPosition, engine):
@@ -429,10 +429,10 @@ class ScaledStrategy(BlofinStrategy):
         lot_size = await self._get_lot_size(pos.symbol, engine)
         pos.remaining_size = self._round_size_to_lot(pos.original_size * 0.25, lot_size)
 
-        print(f"\n{'='*40}")
-        print(f" **TP2 HIT** - {pos.symbol}")
-        print(f"   Closed: 25% @ {pos.tp2_price}")
-        print(f"   Remaining: {pos.remaining_size}")
+        logger.info(f"\n{'='*40}")
+        logger.info(f" **TP2 HIT** - {pos.symbol}")
+        logger.info(f"   Closed: 25% @ {pos.tp2_price}")
+        logger.info(f"   Remaining: {pos.remaining_size}")
 
         # Cancel old SL and move to ENTRY PRICE (breakeven)
         if pos.sl_order_id:
@@ -448,7 +448,7 @@ class ScaledStrategy(BlofinStrategy):
                 pos.sl_order_id = data[0].get('tpslId')
             elif isinstance(data, dict):
                 pos.sl_order_id = data.get('tpslId')
-            print(f"   SL moved to ENTRY: {pos.entry_price} (breakeven)")
+            logger.info(f"   SL moved to ENTRY: {pos.entry_price} (breakeven)")
 
         # Create TP3 order for remaining 25%
         if pos.tp3_price:
@@ -462,11 +462,11 @@ class ScaledStrategy(BlofinStrategy):
                     pos.tp3_order_id = data[0].get('tpslId')
                 elif isinstance(data, dict):
                     pos.tp3_order_id = data.get('tpslId')
-                print(f"   TP3 set: {pos.tp3_price} (remaining 25%)")
+                logger.info(f"   TP3 set: {pos.tp3_price} (remaining 25%)")
             else:
-                print(f"   TP3 failed: {tp3_res.get('msg', 'Unknown') if tp3_res else 'No response'}")
+                logger.info(f"   TP3 failed: {tp3_res.get('msg', 'Unknown') if tp3_res else 'No response'}")
 
-        print(f"{'='*40}")
+        logger.info(f"{'='*40}")
         self._save_positions()
 
     async def _handle_tp3_hit(self, pos: ScaledPosition):
@@ -474,12 +474,12 @@ class ScaledStrategy(BlofinStrategy):
         pos.tp3_hit = True
         pos.remaining_size = 0
 
-        print(f"\n{'='*40}")
-        print(f" **TP3 HIT - POSITION CLOSED** - {pos.symbol}")
-        print(f"   Final close @ {pos.tp3_price}")
-        print(f"   Entry: {pos.entry_price}")
-        print(f"   Strategy completed successfully!")
-        print(f"{'='*40}")
+        logger.info(f"\n{'='*40}")
+        logger.info(f" **TP3 HIT - POSITION CLOSED** - {pos.symbol}")
+        logger.info(f"   Final close @ {pos.tp3_price}")
+        logger.info(f"   Entry: {pos.entry_price}")
+        logger.info(f"   Strategy completed successfully!")
+        logger.info(f"{'='*40}")
         self._save_positions()
 
     async def _handle_sl_hit(self, pos: ScaledPosition):
@@ -488,15 +488,15 @@ class ScaledStrategy(BlofinStrategy):
 
         sl_level = "entry (breakeven)" if pos.tp2_hit else f"{pos.sl_price}"
 
-        print(f"\n{'='*40}")
-        print(f" **STOP LOSS HIT** - {pos.symbol}")
-        print(f"   SL triggered @ {sl_level}")
-        print(f"   Entry was: {pos.entry_price}")
+        logger.info(f"\n{'='*40}")
+        logger.info(f" **STOP LOSS HIT** - {pos.symbol}")
+        logger.info(f"   SL triggered @ {sl_level}")
+        logger.info(f"   Entry was: {pos.entry_price}")
         if pos.tp1_hit:
-            print(f"   TP1 was hit (50% profit taken)")
+            logger.info(f"   TP1 was hit (50% profit taken)")
         if pos.tp2_hit:
-            print(f"   TP2 was hit (75% profit taken, SL at breakeven)")
-        print(f"{'='*40}")
+            logger.info(f"   TP2 was hit (75% profit taken, SL at breakeven)")
+        logger.info(f"{'='*40}")
 
         pos.remaining_size = 0
         self._save_positions()

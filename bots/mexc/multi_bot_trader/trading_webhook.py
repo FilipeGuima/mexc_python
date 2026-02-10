@@ -33,17 +33,16 @@ while True:
     }
     bot_index += 1
 
-print(f"Loaded {len(ACCOUNTS)} bots from configuration.")
+from common.logger import setup_logging
+
+logger = setup_logging("MexcWebhookTrader")
+logger.info(f"Loaded {len(ACCOUNTS)} bots from configuration.")
 
 
 # --- DEFAULT TRADING PARAMETERS ---
 DEFAULT_EQUITY_PERC = 0.5
 DEFAULT_LEVERAGE = 10
 DEFAULT_CLOSE_PERC = 100.0
-
-# --- SETUP ---
-logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Multi-Account MEXC Trading Webhook")
 
@@ -163,7 +162,7 @@ async def webhook(request: Request):
     msg = msg.replace('"', '').replace("'", "")
 
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"\n>>> {ts} - RECEIVED: '{msg}'")
+    logger.info(f"\n>>> {ts} - RECEIVED: '{msg}'")
 
     try:
         parts = msg.split(',')
@@ -201,10 +200,10 @@ async def webhook(request: Request):
             result = await partially_close_trade(current_api, default_pair, percentage)
 
         else:
-            print(f"IGNORED UNKNOWN COMMAND: {command}")
+            logger.warning(f"IGNORED UNKNOWN COMMAND: {command}")
             return {"status": "ignored", "reason": "unknown command"}
 
-        print(f"Execution Result ({account_id} on {default_pair}): {result}")
+        logger.info(f"Execution Result ({account_id} on {default_pair}): {result}")
 
         if result.get("success"):
             return result
@@ -212,26 +211,26 @@ async def webhook(request: Request):
             raise HTTPException(status_code=500, detail=result.get("error", "Unknown error."))
 
     except (ValueError, IndexError) as e:
-        print(f"Error parsing arguments: {e}")
+        logger.error(f"Error parsing arguments: {e}")
         raise HTTPException(status_code=400, detail=f"Invalid arguments: {e}")
     except Exception as e:
-        print(f"Server Error: {e}")
+        logger.error(f"Server Error: {e}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {e}")
 
 
 async def check_api_connections():
-    print(" Checking MEXC API connections...")
+    logger.info(" Checking MEXC API connections...")
     for name, cfg in ACCOUNTS.items():
         api = MexcFuturesAPI(token=cfg["token"], testnet=MEXC_TESTNET)
         res = await api.get_user_assets()
         if res.success:
             usdt = next((a for a in res.data if a.currency == "USDT"), None)
             bal = f"{usdt.availableBalance:.2f} USDT" if usdt else "No USDT found"
-            print(f"  {name}: OK | {bal} | Pair: {cfg['pair']}")
+            logger.info(f"  {name}: OK | {bal} | Pair: {cfg['pair']}")
         else:
-            print(f"  {name}: FAILED - {res.message}")
+            logger.error(f"  {name}: FAILED - {res.message}")
 
 if __name__ == "__main__":
-    print("Starting Multi-Account MEXC Trading Webhook...")
+    logger.info("Starting Multi-Account MEXC Trading Webhook...")
     asyncio.run(check_api_connections())
     uvicorn.run(app, host="0.0.0.0", port=80, log_config=None)

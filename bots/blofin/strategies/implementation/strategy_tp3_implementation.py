@@ -5,13 +5,16 @@ Blofin TP3 Strategy (100% Close at TP3)
 - Does NOT support BREAKEVEN signals
 """
 
+import logging
 from typing import Optional
 from bots.blofin.strategies.interface.strategy_interface import BlofinStrategy
 from common.utils import adjust_price_to_step
 
+logger = logging.getLogger("BlofinTP3Strategy")
+
 
 class TP3Strategy(BlofinStrategy):
-    name = "BLOFIN TP3 BOT (100% Close at TP3)"
+    name = "BLOFIN TP3 BOT"
 
     def validate_signal(self, signal_data: dict) -> Optional[str]:
         """No extra validation needed for TP3 strategy."""
@@ -63,12 +66,12 @@ class TP3Strategy(BlofinStrategy):
                     parts.append(f"TP3: {tp_price}")
                 if sl_price:
                     parts.append(f"SL: {sl_price}")
-                print(f"   Set: {', '.join(parts)}")
+                logger.info(f"   Set: {', '.join(parts)}")
             else:
                 error = res.get('msg', 'Failed') if res else 'No response'
-                print(f"   TPSL Failed: {error}")
+                logger.info(f"   TPSL Failed: {error}")
 
-        print(f"{'='*40}")
+        logger.info(f"{'='*40}")
 
         # Add to active positions
         engine.active_positions[symbol] = {

@@ -1,6 +1,9 @@
+import logging
 from datetime import datetime, timezone
 from telethon import TelegramClient, events
 from bots.common.listener_interface import ListenerInterface
+
+logger = logging.getLogger(__name__)
 
 
 class TelegramListenerImplementation(ListenerInterface):
@@ -13,7 +16,7 @@ class TelegramListenerImplementation(ListenerInterface):
 
     def connect(self):
         """Register message handler and connect to Telegram. Synchronous (blocks briefly)."""
-        print(f" Listening to chats: {self.target_chats}")
+        logger.info(f"Listening to chats: {self.target_chats}")
 
         start_time = self.start_time
 

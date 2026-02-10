@@ -48,23 +48,20 @@ class SignalParser:
 
     @classmethod
     def parse(cls, text: str, debug: bool = True) -> dict | None:
-        if debug:
-            print(f" DEBUG RAW: {repr(text)}")
+        logger.debug(f"RAW: {repr(text)}")
 
         text_upper = cls._clean_text(text)
         data = {}
 
         # Ignore Status Updates
         if "TARGET HIT" in text_upper or "PROFIT:" in text_upper:
-            if debug:
-                print(" Ignored: Status/Profit update")
+            logger.debug("Ignored: Status/Profit update")
             return None
 
         # --- PAIR ---
         pair_match = re.search(r'PAIR[\W_]*([A-Z0-9]+)[\W_]*[/_:-]?[\W_]*([A-Z0-9]+)', text_upper)
         if not pair_match:
-            if debug:
-                print(" Parsing failed: No PAIR found.")
+            logger.debug("Parsing failed: No PAIR found.")
             return None
         data['symbol'] = f"{pair_match.group(1)}_{pair_match.group(2)}"
 
@@ -78,8 +75,7 @@ class SignalParser:
         # --- SIDE (returns plain string) ---
         side_match = re.search(r'SIDE[\W_]*(LONG|SHORT)', text_upper)
         if not side_match:
-            if debug:
-                print(" Parsing failed: No SIDE found.")
+            logger.debug("Parsing failed: No SIDE found.")
             return None
         data['side'] = side_match.group(1)  # "LONG" or "SHORT"
 
@@ -127,8 +123,7 @@ class SignalParser:
         data['tps'] = real_tps[:3]
         data['type'] = 'TRADE'
 
-        if debug:
-            print(f" PARSED SIGNAL: {data}")
+        logger.debug(f"PARSED SIGNAL: {data}")
         return data
 
 
@@ -150,8 +145,7 @@ class UpdateParser:
 
         pair_match = re.search(r'([A-Z0-9]+)[\W_]*[/_:-][\W_]*([A-Z0-9]+)', text_upper)
         if not pair_match:
-            if debug:
-                print(" Update detected but NO PAIR found. Ignoring.")
+            logger.debug("Update detected but NO PAIR found. Ignoring.")
             return None
 
         data['symbol'] = f"{pair_match.group(1)}_{pair_match.group(2)}"
@@ -160,16 +154,14 @@ class UpdateParser:
         if sl_match:
             data['type'] = 'SL'
             data['price'] = float(sl_match.group(1).replace(',', ''))
-            if debug:
-                print(f" PARSED UPDATE: {data}")
+            logger.debug(f"PARSED UPDATE: {data}")
             return data
 
         tp_match = re.search(r'(TP\d?)\W+(?:IS\W+)?(?:NOW|TO|BE)\W+([\d,.]+)', text_upper)
         if tp_match:
             data['type'] = tp_match.group(1)
             data['price'] = float(tp_match.group(2).replace(',', ''))
-            if debug:
-                print(f" PARSED UPDATE: {data}")
+            logger.debug(f"PARSED UPDATE: {data}")
             return data
 
         return None

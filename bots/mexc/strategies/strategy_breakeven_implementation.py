@@ -24,7 +24,7 @@ logger = logging.getLogger("MexcBreakevenStrategy")
 
 
 class MexcBreakevenStrategy(MexcStrategy):
-    name = "MEXC BREAKEVEN BOT (Market Entry)"
+    name = "MEXC BREAKEVEN BOT "
 
     def parse_signal(self, text: str) -> Optional[dict]:
         """
@@ -37,7 +37,7 @@ class MexcBreakevenStrategy(MexcStrategy):
             text_clean = re.sub(r'[^a-zA-Z0-9\s.:,/%-]', '', text)
             text_clean = re.sub(r'\s+', ' ', text_clean).strip()
 
-            print(f" DEBUG CLEANED: {text_clean}")
+            logger.debug(f"CLEANED: {text_clean}")
 
             # Ignore status messages
             if "TARGET HIT" in text_clean.upper() or "PROFIT:" in text_clean.upper():
@@ -120,22 +120,22 @@ class MexcBreakevenStrategy(MexcStrategy):
         if "PAIR:" not in text.upper():
             return None
 
-        print(f"\n--- Signal Detected ---")
+        logger.info(f"\n--- Signal Detected ---")
 
         result = self.parse_signal(text)
 
         if not result.get('valid'):
             error = result.get('error', 'Unknown error')
             if "Ignored" in error:
-                print(f" -> {error}")
+                logger.info(f" -> {error}")
             else:
-                print(f"  {error}")
+                logger.info(f"  {error}")
             return None
 
         symbol = result['symbol']
 
         if result['type'] == 'BREAKEVEN':
-            print(f"  Processing BREAKEVEN for {symbol}...")
+            logger.info(f"  Processing BREAKEVEN for {symbol}...")
             return await self._move_sl_to_entry(symbol, engine)
 
         elif result['type'] == 'TRADE':
@@ -144,7 +144,7 @@ class MexcBreakevenStrategy(MexcStrategy):
             if validation_error:
                 return validation_error
 
-            print(f"  Processing TRADE for {symbol}...")
+            logger.info(f"  Processing TRADE for {symbol}...")
             return await self.execute_trade(result, engine)
 
         return None
@@ -322,7 +322,7 @@ class MexcBreakevenStrategy(MexcStrategy):
         existing_sl_order_id = None
         existing_tp_price = None
 
-        print(f"    Scanning for SL on {symbol} (Entry: {entry_price})...")
+        logger.info(f"    Scanning for SL on {symbol} (Entry: {entry_price})...")
 
         for attempt in range(3):
             stops_res = await engine.api.get_stop_limit_orders(symbol=symbol, is_finished=0)
@@ -364,7 +364,7 @@ class MexcBreakevenStrategy(MexcStrategy):
             await asyncio.sleep(1.5)
 
         if existing_sl_order_id:
-            print(f"   Identified SL (ID: {existing_sl_order_id}). Editing...")
+            logger.info(f"   Identified SL (ID: {existing_sl_order_id}). Editing...")
 
             res = await engine.api.update_stop_limit_trigger_plan_price(
                 stop_plan_order_id=existing_sl_order_id,
@@ -376,11 +376,11 @@ class MexcBreakevenStrategy(MexcStrategy):
                 tp_msg = f" (TP kept at {existing_tp_price})" if existing_tp_price else " (No TP found)"
                 return f"  **SL Updated to Entry!**\n   Symbol: {symbol}\n   New SL: {final_sl_price}\n  {tp_msg}"
 
-            print(f"    Edit Failed ({res.message}). executing CANCEL & REPLACE strategy...")
+            logger.warning(f"Edit Failed ({res.message}). executing CANCEL & REPLACE strategy...")
             await engine.api.cancel_stop_limit_order(stop_plan_order_id=existing_sl_order_id)
 
         else:
-            print("    No existing SL identified. Creating NEW SL...")
+            logger.info("    No existing SL identified. Creating NEW SL...")
 
         # Create new SL order
         if pos_type == 1:  # Long
@@ -414,7 +414,7 @@ class MexcBreakevenStrategy(MexcStrategy):
         Resume monitoring for existing positions on startup.
         Matches original telegram_listener_breakeven.py resume_monitoring() exactly.
         """
-        print("\n  RESUME: Checking for existing open positions...")
+        logger.info("\n  RESUME: Checking for existing open positions...")
 
         pos_res = await engine.api.get_open_positions()
 
@@ -423,13 +423,13 @@ class MexcBreakevenStrategy(MexcStrategy):
             for pos in pos_res.data:
                 symbol = pos.symbol
                 vol = pos.holdVol
-                print(f"   Resuming monitor for {symbol} (Vol: {vol})")
+                logger.info(f"   Resuming monitor for {symbol} (Vol: {vol})")
 
                 asyncio.create_task(engine.monitor_trade(symbol, vol, targets=[]))
                 count += 1
-            print(f"  Resumed monitoring for {count} positions.\n")
+            logger.info(f"  Resumed monitoring for {count} positions.\n")
         else:
-            print("  No existing positions found to resume.\n")
+            logger.info("  No existing positions found to resume.\n")
 
     @property
     def supports_updates(self) -> bool:
