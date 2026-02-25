@@ -1,4 +1,17 @@
 """
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+DEPRECATED - DO NOT USE
+
+This file is legacy code. Use the new entry point instead:
+    python bots/blofin/main_scaled.py
+
+The new entry point:
+- Uses the shared BlofinBotEngine (less code duplication)
+- Supports per-strategy account credentials (BLOFIN_SCALED_API_KEY, etc.)
+- Has better error handling and retry logic
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+Original description:
 Blofin Scaled Exit Strategy Bot
 
 Strategy:

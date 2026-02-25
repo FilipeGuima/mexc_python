@@ -3,6 +3,7 @@ import asyncio
 import json
 import time
 import logging
+import random
 from typing import Optional, List, Dict, Any
 from .sign import get_auth_headers
 from .blofinTypes import (
@@ -11,6 +12,14 @@ from .blofinTypes import (
 )
 
 logger = logging.getLogger("BlofinAPI")
+
+# Default timeout for API requests (seconds)
+DEFAULT_TIMEOUT = 30
+
+# Retry configuration
+MAX_RETRIES = 3
+BASE_RETRY_DELAY = 1.0  # seconds
+MAX_RETRY_DELAY = 30.0  # seconds
 
 
 class RateLimiter:
@@ -54,50 +63,101 @@ class BlofinFuturesAPI:
             self.base_url = "https://openapi.blofin.com"
 
     async def _make_request(self, method: str, endpoint: str, params: Optional[Dict] = None,
-                            body: Optional[Dict] = None):
-        # Rate limit before making request
-        await self.rate_limiter.acquire()
-        url = f"{self.base_url}{endpoint}"
-        request_path = endpoint
+                            body: Optional[Dict] = None, retries: int = MAX_RETRIES):
+        """
+        Make an API request with retry logic for transient errors.
 
-        if method == "GET" and params:
-            # CRITICAL: Sort params alphabetically for correct signature generation
-            sorted_params = sorted(params.items(), key=lambda x: x[0])
-            query_string = "&".join([f"{k}={v}" for k, v in sorted_params])
-            request_path = f"{endpoint}?{query_string}"
-            url = f"{self.base_url}{request_path}"
+        Handles:
+        - Network timeouts with exponential backoff
+        - Cloudflare 500 errors with retry
+        - Connection errors with retry
+        """
+        last_error = None
 
-        headers = get_auth_headers(
-            request_path,
-            method,
-            body,
-            self.api_key,
-            self.secret_key,
-            self.passphrase
-        )
+        for attempt in range(retries):
+            try:
+                # Rate limit before making request
+                await self.rate_limiter.acquire()
 
-        data_payload = None
-        if body is not None:
-            data_payload = json.dumps(body, separators=(',', ':'))
+                url = f"{self.base_url}{endpoint}"
+                request_path = endpoint
 
-        async with aiohttp.ClientSession() as session:
-            async with session.request(
+                if method == "GET" and params:
+                    # CRITICAL: Sort params alphabetically for correct signature generation
+                    sorted_params = sorted(params.items(), key=lambda x: x[0])
+                    query_string = "&".join([f"{k}={v}" for k, v in sorted_params])
+                    request_path = f"{endpoint}?{query_string}"
+                    url = f"{self.base_url}{request_path}"
+
+                headers = get_auth_headers(
+                    request_path,
                     method,
-                    url,
-                    headers=headers,
-                    data=data_payload
-            ) as response:
-                # Log rate limit headers if present (helps debug limits)
-                rate_limit = response.headers.get('X-RateLimit-Limit')
-                rate_remaining = response.headers.get('X-RateLimit-Remaining')
-                if rate_remaining and int(rate_remaining) < 10:
-                    logger.warning(f"Rate limit low: {rate_remaining}/{rate_limit} remaining")
+                    body,
+                    self.api_key,
+                    self.secret_key,
+                    self.passphrase
+                )
 
-                try:
-                    return await response.json(content_type=None)
-                except Exception:
-                    text = await response.text()
-                    return {"code": "error", "msg": f"Raw Response (Not JSON): {text}"}
+                data_payload = None
+                if body is not None:
+                    data_payload = json.dumps(body, separators=(',', ':'))
+
+                timeout = aiohttp.ClientTimeout(total=DEFAULT_TIMEOUT)
+
+                async with aiohttp.ClientSession(timeout=timeout) as session:
+                    async with session.request(
+                            method,
+                            url,
+                            headers=headers,
+                            data=data_payload
+                    ) as response:
+                        # Log rate limit headers if present (helps debug limits)
+                        rate_limit = response.headers.get('X-RateLimit-Limit')
+                        rate_remaining = response.headers.get('X-RateLimit-Remaining')
+                        if rate_remaining and int(rate_remaining) < 10:
+                            logger.warning(f"Rate limit low: {rate_remaining}/{rate_limit} remaining")
+
+                        try:
+                            result = await response.json(content_type=None)
+
+                            # Check for server-side errors that warrant retry
+                            if response.status >= 500:
+                                raise aiohttp.ServerConnectionError(f"Server error {response.status}")
+
+                            return result
+                        except json.JSONDecodeError:
+                            text = await response.text()
+
+                            # Cloudflare error pages - retry these
+                            if "cloudflare" in text.lower() or response.status >= 500:
+                                raise aiohttp.ServerConnectionError(
+                                    f"Cloudflare/Server error (status {response.status})"
+                                )
+
+                            return {"code": "error", "msg": f"Raw Response (Not JSON): {text}"}
+
+            except (asyncio.TimeoutError, aiohttp.ServerConnectionError,
+                    aiohttp.ClientConnectionError, aiohttp.ServerTimeoutError) as e:
+                last_error = e
+
+                if attempt < retries - 1:
+                    # Exponential backoff with jitter
+                    delay = min(BASE_RETRY_DELAY * (2 ** attempt) + random.uniform(0, 1), MAX_RETRY_DELAY)
+                    logger.warning(
+                        f"Request failed (attempt {attempt + 1}/{retries}): {type(e).__name__}: {e}. "
+                        f"Retrying in {delay:.1f}s..."
+                    )
+                    await asyncio.sleep(delay)
+                else:
+                    logger.error(f"Request failed after {retries} attempts: {type(e).__name__}: {e}")
+
+            except aiohttp.ClientError as e:
+                # Other client errors - don't retry
+                logger.error(f"Client error (not retrying): {type(e).__name__}: {e}")
+                return {"code": "error", "msg": f"Client error: {e}"}
+
+        # All retries exhausted
+        return {"code": "error", "msg": f"Request failed after {retries} retries: {last_error}"}
 
     # --- Account ---
     async def get_user_assets(self) -> List[AssetInfo]:

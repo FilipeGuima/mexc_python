@@ -697,7 +697,19 @@ class BlofinBotEngine:
     # ===================================================================
 
     async def _monitor_loop(self):
-        """Background task: monitors pending orders, active positions, and strategy tick."""
+        """
+        Background task: monitors pending orders, active positions, and strategy tick.
+
+        Includes:
+        - Exponential backoff on repeated errors
+        - Circuit breaker pattern for API outages
+        - Graceful handling of network/Cloudflare errors
+        """
+        consecutive_errors = 0
+        max_consecutive_errors = 10
+        base_sleep = 5  # Normal polling interval
+        max_error_sleep = 120  # Max backoff on errors (2 minutes)
+
         while True:
             try:
                 # === PART 1: Monitor Pending Orders ===
@@ -790,11 +802,64 @@ class BlofinBotEngine:
                 # === PART 3: Strategy Tick ===
                 await self.strategy.on_tick(self)
 
-                await asyncio.sleep(5)
+                # Success - reset error counter and use normal sleep
+                consecutive_errors = 0
+                await asyncio.sleep(base_sleep)
+
+            except asyncio.CancelledError:
+                # Task is being cancelled (shutdown) - exit cleanly
+                self.logger.info("Monitor loop cancelled, shutting down...")
+                raise
+
+            except (asyncio.TimeoutError, TimeoutError) as e:
+                # Network timeout - use exponential backoff
+                consecutive_errors += 1
+                backoff = min(base_sleep * (2 ** consecutive_errors), max_error_sleep)
+                self.logger.warning(
+                    f"Monitor timeout (error {consecutive_errors}/{max_consecutive_errors}): {e}. "
+                    f"Retrying in {backoff:.0f}s..."
+                )
+                await asyncio.sleep(backoff)
 
             except Exception as e:
-                self.logger.error(f"Monitor error: {e}", exc_info=True)
-                await asyncio.sleep(10)
+                consecutive_errors += 1
+                error_type = type(e).__name__
+                error_msg = str(e)
+
+                # Check if this looks like a Cloudflare/server error
+                is_server_error = (
+                    "cloudflare" in error_msg.lower() or
+                    "500" in error_msg or
+                    "502" in error_msg or
+                    "503" in error_msg or
+                    "server" in error_msg.lower()
+                )
+
+                if is_server_error:
+                    # Cloudflare/server errors - use exponential backoff
+                    backoff = min(base_sleep * (2 ** consecutive_errors), max_error_sleep)
+                    self.logger.warning(
+                        f"Monitor server error (error {consecutive_errors}/{max_consecutive_errors}): "
+                        f"{error_type}: {error_msg[:100]}. Retrying in {backoff:.0f}s..."
+                    )
+                    await asyncio.sleep(backoff)
+                else:
+                    # Other errors - log full traceback, moderate backoff
+                    backoff = min(10 * consecutive_errors, max_error_sleep)
+                    self.logger.error(
+                        f"Monitor error (error {consecutive_errors}/{max_consecutive_errors}): {error_type}",
+                        exc_info=True
+                    )
+                    await asyncio.sleep(backoff)
+
+                # Circuit breaker: if too many consecutive errors, slow down significantly
+                if consecutive_errors >= max_consecutive_errors:
+                    self.logger.error(
+                        f"Circuit breaker triggered: {consecutive_errors} consecutive errors. "
+                        f"Backing off for {max_error_sleep}s before resuming..."
+                    )
+                    await asyncio.sleep(max_error_sleep)
+                    consecutive_errors = max_consecutive_errors // 2  # Partially reset
 
     # ===================================================================
     # ORDER/POSITION EVENT HANDLERS

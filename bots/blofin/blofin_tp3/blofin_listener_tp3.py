@@ -1,3 +1,17 @@
+"""
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+DEPRECATED - DO NOT USE
+
+This file is legacy code. Use the new entry point instead:
+    python bots/blofin/main_tp3.py
+
+The new entry point:
+- Uses the shared BlofinBotEngine (less code duplication)
+- Supports per-strategy account credentials (BLOFIN_TP3_API_KEY, etc.)
+- Has better error handling and retry logic
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+"""
+
 import asyncio
 import logging
 import re
