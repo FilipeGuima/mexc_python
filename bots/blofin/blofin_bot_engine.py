@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from blofincpy.api import BlofinFuturesAPI
 from bots.common.listener_interface import ListenerInterface
 from bots.blofin.strategies.interface.strategy_interface import BlofinStrategy
-from common.parser import parse_signal, UpdateParser
+from common.parser import UpdateParser
 from common.utils import adjust_price_to_step, validate_signal_tp_sl
 from common.logger import setup_logging
 
@@ -90,11 +90,11 @@ class BlofinBotEngine:
         """Route incoming messages to appropriate handlers."""
         text_upper = text.upper()
 
-        # Route 1: New Trade Signals (PAIR + SIDE)
-        if "PAIR" in text_upper and "SIDE" in text_upper:
+        # Route 1: New Trade Signals (delegated to strategy's parser)
+        if self.strategy.parser.can_handle(text):
             self.logger.info(f"New Signal Detected ({datetime.now().strftime('%H:%M:%S')})")
 
-            signal_data = parse_signal(text)
+            signal_data = self.strategy.parser.parse(text)
             if not signal_data:
                 self.logger.warning("Failed to parse signal.")
                 return
@@ -233,6 +233,19 @@ class BlofinBotEngine:
 
         self.logger.info(f" Current Price: {current_price} | Entry Price: {entry_price}")
 
+        # Sanity check: reject if entry is wildly off from current price
+        deviation = abs(current_price - entry_price) / current_price
+        if deviation > 0.90:
+            return (
+                f"\n{'='*50}\n"
+                f"  **ORDER REJECTED** - {formatted_symbol}\n"
+                f"   Reason: ENTRY PRICE SANITY CHECK FAILED\n"
+                f"   Entry: {entry_price} vs Market: {current_price}\n"
+                f"   Deviation: {deviation:.1%} (max allowed: 90%)\n"
+                f"   The signal likely has the wrong pair.\n"
+                f"{'='*50}"
+            )
+
         # Smart entry logic
         use_market_order = False
         order_reason = "LIMIT ORDER"
@@ -297,12 +310,23 @@ class BlofinBotEngine:
         if use_market_order:
             self.logger.info(f" Placing MARKET {blofin_side.upper()} {formatted_symbol} x{leverage} | Vol: {final_vol}")
 
+            # For non-scaled strategies, attach TP/SL directly to the order
+            market_tp = None
+            market_sl = None
+            if not is_scaled:
+                market_tp = tp_config.get('tp')
+                market_sl = tp_config.get('sl')
+                if market_tp or market_sl:
+                    self.logger.info(f"   Attaching TP/SL to order: TP={market_tp}, SL={market_sl}")
+
             res = await self.api.create_market_order(
                 symbol=formatted_symbol,
                 side=blofin_side,
                 vol=final_vol,
                 leverage=leverage,
-                position_side=pos_side
+                position_side=pos_side,
+                take_profit=market_tp,
+                stop_loss=market_sl
             )
 
             self.logger.info(f"Order Response: {res}")
@@ -318,6 +342,10 @@ class BlofinBotEngine:
 
                 # Wait for fill
                 await asyncio.sleep(1.5)
+
+                # Tell strategy whether TP/SL was already attached to the order
+                if not is_scaled and (market_tp or market_sl):
+                    order_info['tpsl_attached'] = True
 
                 # Let strategy handle the fill
                 await self.strategy.on_order_fill(order_id, order_info, final_vol, current_price, self)

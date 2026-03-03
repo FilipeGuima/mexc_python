@@ -97,7 +97,16 @@ class Tp1TrailStrategy(BlofinStrategy):
 
         tpsl_id = None
 
-        if tp_price or sl_price:
+        if order_info.get('tpsl_attached'):
+            # TP/SL was already attached to the market order
+            parts = []
+            if tp_price:
+                parts.append(f"TP3: {tp_price}")
+            if sl_price:
+                parts.append(f"SL: {sl_price}")
+            logger.info(f"   TP/SL attached to order: {', '.join(parts)}")
+            # We don't have a tpsl_id — trail logic will need to query TPSL orders
+        elif tp_price or sl_price:
             close_side = "sell" if side == "buy" else "buy"
             position_side = "long" if side == "buy" else "short"
 
@@ -208,7 +217,7 @@ class Tp1TrailStrategy(BlofinStrategy):
                 position_side = "long" if side == "buy" else "short"
                 close_side = "sell" if side == "buy" else "buy"
 
-                # Cancel old TPSL order
+                # Cancel old TPSL order(s)
                 old_tpsl_id = info.get('tpsl_id')
                 if old_tpsl_id:
                     cancelled = await engine.cancel_tpsl_order(symbol, old_tpsl_id)
@@ -216,6 +225,15 @@ class Tp1TrailStrategy(BlofinStrategy):
                         logger.info(f"   Cancelled old TPSL: {old_tpsl_id}")
                     else:
                         logger.warning(f"   Failed to cancel old TPSL: {old_tpsl_id}")
+                else:
+                    # TP/SL was attached to order — cancel all active TPSL orders for this symbol
+                    tpsl_orders = await engine.api.get_tpsl_orders(symbol)
+                    if tpsl_orders:
+                        for tpsl in tpsl_orders:
+                            tid = tpsl.get('tpslId')
+                            if tid:
+                                await engine.cancel_tpsl_order(symbol, tid)
+                                logger.info(f"   Cancelled attached TPSL: {tid}")
 
                 # Place new TPSL with SL=TP2, TP=TP3
                 new_tpsl_id = None

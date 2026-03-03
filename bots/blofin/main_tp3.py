@@ -18,7 +18,7 @@ from bots.listeners.telegram_listener_implementation import TelegramListenerImpl
 from bots.blofin.blofin_bot_engine import BlofinBotEngine
 from bots.blofin.strategies.implementation.strategy_tp3_implementation import TP3Strategy
 from mexcpy.config import (
-    API_ID, API_HASH, TARGET_CHATS, SESSION_BLOFIN_TP3,
+    API_ID, API_HASH, BLOFIN_TP3_CHATS, SESSION_BLOFIN_TP3,
     BLOFIN_TP3_API_KEY, BLOFIN_TP3_SECRET_KEY, BLOFIN_TP3_PASSPHRASE, BLOFIN_TP3_TESTNET
 )
 
@@ -27,7 +27,7 @@ if __name__ == "__main__":
         session_name=str(SESSION_BLOFIN_TP3),
         api_id=API_ID,
         api_hash=API_HASH,
-        target_chats=TARGET_CHATS
+        target_chats=BLOFIN_TP3_CHATS
     )
     strategy = TP3Strategy()
     engine = BlofinBotEngine(

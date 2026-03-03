@@ -10,6 +10,8 @@ different parsers, different close handling).
 from abc import ABC, abstractmethod
 from typing import Optional
 
+from common.parser import BaseSignalParser, DefaultSignalParser
+
 
 class MexcStrategy(ABC):
     """
@@ -20,6 +22,11 @@ class MexcStrategy(ABC):
     """
 
     name: str = "MexcBot"
+
+    @property
+    def parser(self) -> BaseSignalParser:
+        """Signal parser used by this strategy. Override to use a different format."""
+        return DefaultSignalParser()
 
     @abstractmethod
     def parse_signal(self, text: str) -> Optional[dict]:

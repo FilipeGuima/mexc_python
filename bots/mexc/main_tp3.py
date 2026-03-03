@@ -14,7 +14,7 @@ from bots.listeners.telegram_listener_implementation import TelegramListenerImpl
 from bots.mexc.mexc_bot_engine import MexcBotEngine
 from bots.mexc.strategies.strategy_tp3_implementation import MexcTP3Strategy
 from mexcpy.config import (
-    API_ID, API_HASH, TARGET_CHATS, SESSION_TP3,
+    API_ID, API_HASH, MEXC_TP3_CHATS, SESSION_TP3,
     TP3_TOKEN, MEXC_TESTNET
 )
 
@@ -23,7 +23,7 @@ if __name__ == "__main__":
         session_name=str(SESSION_TP3),
         api_id=API_ID,
         api_hash=API_HASH,
-        target_chats=TARGET_CHATS
+        target_chats=MEXC_TP3_CHATS
     )
     strategy = MexcTP3Strategy()
     engine = MexcBotEngine(

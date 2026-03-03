@@ -447,14 +447,158 @@ class BlofinAdapter(ExchangeAdapter):
         return exchange_symbol.replace("-", "_")
 
 
+# --- Binance Adapter ---
+
+class BinanceAdapter(ExchangeAdapter):
+    def __init__(self, api):
+        from binancecpy.api import BinanceFuturesAPI
+        self._api: BinanceFuturesAPI = api
+
+    @property
+    def exchange_name(self) -> str:
+        return "Binance"
+
+    async def get_assets(self) -> Optional[List[StatsAssetInfo]]:
+        assets = await self._api.get_user_assets()
+        if not assets:
+            return None
+        return [
+            StatsAssetInfo(
+                currency=a.asset,
+                equity=a.balance,
+                availableBalance=a.availableBalance,
+                unrealized=a.crossUnPnl,
+            )
+            for a in assets
+        ]
+
+    async def get_open_positions(self, symbol: Optional[str] = None) -> Optional[List[StatsPositionInfo]]:
+        binance_symbol = self.to_exchange_symbol(symbol) if symbol else None
+        positions = await self._api.get_open_positions(symbol=binance_symbol)
+        if not positions:
+            return None
+        return [
+            StatsPositionInfo(
+                positionId=f"{p.symbol}_{p.positionSide}",
+                symbol=self.to_display_symbol(p.symbol),
+                holdVol=abs(p.positionAmt),
+                positionType="LONG" if p.positionAmt > 0 else "SHORT",
+                openAvgPrice=p.entryPrice,
+                closeAvgPrice=0.0,
+                margin=0.0,
+                unrealized=p.unRealizedProfit,
+                realised=0.0,
+                leverage=p.leverage,
+                createTime=p.updateTime / 1000,
+                updateTime=p.updateTime / 1000,
+            )
+            for p in positions
+        ]
+
+    async def get_historical_positions(self, symbol: Optional[str] = None, page_num: int = 1, page_size: int = 20) -> Optional[List[StatsPositionInfo]]:
+        if not symbol:
+            raise ValueError("Binance get_historical_positions requires a symbol")
+        binance_symbol = self.to_exchange_symbol(symbol)
+        trades = await self._api.get_trades(binance_symbol, limit=page_size)
+        if not trades:
+            return None
+
+        results = []
+        for t in trades:
+            pnl = float(t["realizedPnl"])
+            if pnl == 0:
+                continue
+            results.append(StatsPositionInfo(
+                positionId=str(t["id"]),
+                symbol=self.to_display_symbol(t["symbol"]),
+                holdVol=float(t["qty"]),
+                positionType="LONG" if t["side"] == "BUY" else "SHORT",
+                openAvgPrice=float(t["price"]),
+                closeAvgPrice=float(t["price"]),
+                margin=0.0,
+                unrealized=0.0,
+                realised=pnl,
+                leverage=1,
+                createTime=int(t["time"]) / 1000,
+                updateTime=int(t["time"]) / 1000,
+            ))
+        return results if results else None
+
+    async def get_pending_tp_orders(self) -> Optional[List[StatsOrderInfo]]:
+        orders = await self._api.get_open_algo_orders()
+        if not orders:
+            return None
+        results = [
+            StatsOrderInfo(
+                orderId=str(o["algoId"]),
+                positionId="",
+                symbol=self.to_display_symbol(o["symbol"]),
+                orderType="TP",
+                price=float(o["triggerPrice"]),
+            )
+            for o in orders
+            if o.get("orderType") == "TAKE_PROFIT_MARKET"
+        ]
+        return results if results else None
+
+    async def get_pending_limit_orders(self) -> Optional[List[StatsOrderInfo]]:
+        orders = await self._api.get_open_orders()
+        if not orders:
+            return None
+        results = [
+            StatsOrderInfo(
+                orderId=str(o["orderId"]),
+                positionId="",
+                symbol=self.to_display_symbol(o["symbol"]),
+                orderType="LIMIT",
+                price=float(o["price"]),
+            )
+            for o in orders
+            if o["type"] == "LIMIT"
+        ]
+        return results if results else None
+
+    async def get_ticker(self, symbol: str) -> Optional[StatsTickerInfo]:
+        binance_symbol = self.to_exchange_symbol(symbol)
+        ticker = await self._api.get_ticker(binance_symbol)
+        return StatsTickerInfo(
+            lastPrice=float(ticker["price"]),
+            volume24="N/A",
+        )
+
+    async def get_contract_details(self, symbol: str) -> Optional[StatsContractInfo]:
+        binance_symbol = self.to_exchange_symbol(symbol)
+        info = await self._api.get_instrument_info(binance_symbol)
+        return StatsContractInfo(
+            contractSize=1.0,  # Binance USDT-M is coin-denominated, contractSize=1
+            priceUnit=info["tickSize"],
+        )
+
+    def to_exchange_symbol(self, display_symbol: str) -> str:
+        # Convert BTC_USDT -> BTCUSDT
+        return display_symbol.replace("_", "")
+
+    def to_display_symbol(self, exchange_symbol: str) -> str:
+        # Convert BTCUSDT -> BTC_USDT
+        if exchange_symbol.endswith("USDT"):
+            base = exchange_symbol[:-4]
+            return f"{base}_USDT"
+        return exchange_symbol
+
+
 # --- Factory ---
 
 def create_adapter(account_config: dict) -> ExchangeAdapter:
-    exchange = account_config.get("exchange", "mexc").lower()
+    if "exchange" not in account_config:
+        raise ValueError("account_config missing required 'exchange' key")
+    exchange = account_config["exchange"].lower()
+
+    if "testnet" not in account_config:
+        raise ValueError(f"account_config for '{exchange}' missing required 'testnet' key")
 
     if exchange == "mexc":
         from mexcpy.api import MexcFuturesAPI
-        api = MexcFuturesAPI(token=account_config["token"], testnet=account_config.get("testnet", False))
+        api = MexcFuturesAPI(token=account_config["token"], testnet=account_config["testnet"])
         return MexcAdapter(api)
     elif exchange == "blofin":
         from blofincpy.api import BlofinFuturesAPI
@@ -462,8 +606,16 @@ def create_adapter(account_config: dict) -> ExchangeAdapter:
             api_key=account_config["api_key"],
             secret_key=account_config["secret_key"],
             passphrase=account_config["passphrase"],
-            testnet=account_config.get("testnet", True),
+            testnet=account_config["testnet"],
         )
         return BlofinAdapter(api)
+    elif exchange == "binance":
+        from binancecpy.api import BinanceFuturesAPI
+        api = BinanceFuturesAPI(
+            api_key=account_config["api_key"],
+            secret_key=account_config["secret_key"],
+            testnet=account_config["testnet"],
+        )
+        return BinanceAdapter(api)
     else:
         raise ValueError(f"Unsupported exchange: {exchange}")

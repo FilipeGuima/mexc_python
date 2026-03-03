@@ -14,7 +14,7 @@ from bots.listeners.telegram_listener_implementation import TelegramListenerImpl
 from bots.mexc.mexc_bot_engine import MexcBotEngine
 from bots.mexc.strategies.strategy_breakeven_implementation import MexcBreakevenStrategy
 from mexcpy.config import (
-    API_ID, API_HASH, TARGET_CHATS, SESSION_BREAKEVEN,
+    API_ID, API_HASH, MEXC_BREAKEVEN_CHATS, SESSION_BREAKEVEN,
     BREAKEVEN_TOKEN, MEXC_TESTNET
 )
 
@@ -23,7 +23,7 @@ if __name__ == "__main__":
         session_name=str(SESSION_BREAKEVEN),
         api_id=API_ID,
         api_hash=API_HASH,
-        target_chats=TARGET_CHATS
+        target_chats=MEXC_BREAKEVEN_CHATS
     )
     strategy = MexcBreakevenStrategy()
     engine = MexcBotEngine(

@@ -19,7 +19,7 @@ from bots.listeners.telegram_listener_implementation import TelegramListenerImpl
 from bots.blofin.blofin_bot_engine import BlofinBotEngine
 from bots.blofin.strategies.implementation.strategy_tp1_trail_implementation import Tp1TrailStrategy
 from mexcpy.config import (
-    API_ID, API_HASH, TARGET_CHATS, SESSION_BLOFIN_TP1_TRAIL,
+    API_ID, API_HASH, BLOFIN_TP1_TRAIL_CHATS, SESSION_BLOFIN_TP1_TRAIL,
     BLOFIN_TP1_TRAIL_API_KEY, BLOFIN_TP1_TRAIL_SECRET_KEY, BLOFIN_TP1_TRAIL_PASSPHRASE, BLOFIN_TP1_TRAIL_TESTNET
 )
 
@@ -28,7 +28,7 @@ if __name__ == "__main__":
         session_name=str(SESSION_BLOFIN_TP1_TRAIL),
         api_id=API_ID,
         api_hash=API_HASH,
-        target_chats=TARGET_CHATS
+        target_chats=BLOFIN_TP1_TRAIL_CHATS
     )
     strategy = Tp1TrailStrategy()
     engine = BlofinBotEngine(

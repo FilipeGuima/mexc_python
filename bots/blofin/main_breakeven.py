@@ -18,7 +18,7 @@ from bots.listeners.telegram_listener_implementation import TelegramListenerImpl
 from bots.blofin.blofin_bot_engine import BlofinBotEngine
 from bots.blofin.strategies.implementation.strategy_breakeven_implementation import BreakevenStrategy
 from mexcpy.config import (
-    API_ID, API_HASH, TARGET_CHATS, SESSION_BLOFIN_BREAKEVEN,
+    API_ID, API_HASH, BLOFIN_BREAKEVEN_CHATS, SESSION_BLOFIN_BREAKEVEN,
     BLOFIN_BREAKEVEN_API_KEY, BLOFIN_BREAKEVEN_SECRET_KEY, BLOFIN_BREAKEVEN_PASSPHRASE, BLOFIN_BREAKEVEN_TESTNET
 )
 
@@ -27,7 +27,7 @@ if __name__ == "__main__":
         session_name=str(SESSION_BLOFIN_BREAKEVEN),
         api_id=API_ID,
         api_hash=API_HASH,
-        target_chats=TARGET_CHATS
+        target_chats=BLOFIN_BREAKEVEN_CHATS
     )
     strategy = BreakevenStrategy()
     engine = BlofinBotEngine(

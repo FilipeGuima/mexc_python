@@ -20,7 +20,7 @@ from bots.listeners.telegram_listener_implementation import TelegramListenerImpl
 from bots.blofin.blofin_bot_engine import BlofinBotEngine
 from bots.blofin.strategies.implementation.strategy_scaled_implementation import ScaledStrategy
 from mexcpy.config import (
-    API_ID, API_HASH, TARGET_CHATS, SESSION_BLOFIN_SCALED,
+    API_ID, API_HASH, BLOFIN_SCALED_CHATS, SESSION_BLOFIN_SCALED,
     BLOFIN_SCALED_API_KEY, BLOFIN_SCALED_SECRET_KEY, BLOFIN_SCALED_PASSPHRASE, BLOFIN_SCALED_TESTNET
 )
 
@@ -29,7 +29,7 @@ if __name__ == "__main__":
         session_name=str(SESSION_BLOFIN_SCALED),
         api_id=API_ID,
         api_hash=API_HASH,
-        target_chats=TARGET_CHATS
+        target_chats=BLOFIN_SCALED_CHATS
     )
     strategy = ScaledStrategy()
     engine = BlofinBotEngine(

@@ -4,18 +4,8 @@ from typing import Optional
 from common.parser import BaseSignalParser, DefaultSignalParser
 
 
-class BlofinStrategy(ABC):
-    """
-    Abstract base class for all Blofin trading strategies.
-
-    The engine handles: signal parsing, balance fetching, volume calculation,
-    order placement, monitoring loops, and position tracking.
-
-    Strategies only define: TP selection, fill handling, per-tick logic,
-    and optional breakeven/update support.
-    """
-
-    name: str = "BlofinBot"
+class BinanceStrategy(ABC):
+    name: str = "BinanceBot"
 
     @property
     def parser(self) -> BaseSignalParser:
@@ -32,18 +22,17 @@ class BlofinStrategy(ABC):
         """
         Pick TP/SL from signal data. Return dict with keys like:
         - Simple: {'tp': price, 'sl': price}
-        - Scaled: {'tp1': p, 'tp2': p, 'tp3': p, 'sl': p, 'mode': 'scaled'}
         """
         pass
 
     @abstractmethod
     async def on_order_fill(self, order_id, order_info, filled_size, fill_price, engine):
-        """Order filled - set up TPSL, add to tracking."""
+        """Order filled - set up TP and SL as separate orders, add to tracking."""
         pass
 
     @abstractmethod
     async def on_tick(self, engine):
-        """Called each monitor cycle. Custom monitoring (e.g., scaled TP checks)."""
+        """Called each monitor cycle. Custom monitoring logic."""
         pass
 
     async def on_breakeven_signal(self, symbol: str, engine) -> Optional[str]:
@@ -51,7 +40,7 @@ class BlofinStrategy(ABC):
         return None
 
     async def on_position_closed(self, symbol: str, pos_info: dict, close_reason, engine):
-        """Custom close handling. Default does nothing (engine provides default handler)."""
+        """Custom close handling. Default does nothing."""
         pass
 
     @property

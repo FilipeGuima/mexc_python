@@ -51,7 +51,15 @@ class TP3Strategy(BlofinStrategy):
         tp_price = order_info.get('tp')
         sl_price = order_info.get('sl')
 
-        if tp_price or sl_price:
+        if order_info.get('tpsl_attached'):
+            # TP/SL was already attached to the market order
+            parts = []
+            if tp_price:
+                parts.append(f"TP3: {tp_price}")
+            if sl_price:
+                parts.append(f"SL: {sl_price}")
+            logger.info(f"   TP/SL attached to order: {', '.join(parts)}")
+        elif tp_price or sl_price:
             close_side = "sell" if side == "buy" else "buy"
             position_side = "long" if side == "buy" else "short"
 

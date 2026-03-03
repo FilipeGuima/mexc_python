@@ -166,7 +166,21 @@ class MexcTP1Strategy(MexcStrategy):
         final_sl_price = adjust_price_to_step(sl_price_raw, price_step)
         final_tp_price = adjust_price_to_step(tp1_price_raw, price_step)
 
-        # === STEP 6: Smart entry logic ===
+        # === STEP 6: Entry price sanity check ===
+        if entry_value != "Market" and isinstance(entry_value, (int, float)):
+            deviation = abs(current_price - entry_value) / current_price
+            if deviation > 0.90:
+                return (
+                    f"\n{'='*50}\n"
+                    f"  **ORDER REJECTED** - {symbol}\n"
+                    f"   Reason: ENTRY PRICE SANITY CHECK FAILED\n"
+                    f"   Entry: {entry_value} vs Market: {current_price}\n"
+                    f"   Deviation: {deviation:.1%} (max allowed: 90%)\n"
+                    f"   The signal likely has the wrong pair.\n"
+                    f"{'='*50}"
+                )
+
+        # === STEP 7: Smart entry logic ===
         use_market_order = True
         entry_price = None
         order_reason = "Market Entry"
